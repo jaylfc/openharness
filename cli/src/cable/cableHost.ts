@@ -17,6 +17,7 @@ import { fetchRelease, loadImage, otaKeyForBoard, shouldOffer } from './fwPush.j
 import { routeVoiceTask, type RouterAgent, type RouterContinuity } from '../lib/voiceRouter.js'
 import { env } from '../config/env.js'
 import { extendShortRecap } from '../lib/deviceRecap.js'
+import { deriveReaderText } from '../lib/deviceRecap.js'
 
 import type { AppSwarms, CableAgent, CableHost, CableMachine, CableMachineSource, CableSwarm, CableTile, DialStatus, OpenReason, RouteDecision } from './cableSession.js'
 import type { WindowRoute } from './windowRoute.js'
@@ -33,6 +34,8 @@ export interface RecentTurn {
   text?: string
   /** What the USER asked on that turn. The topic lives here; the recap holds the answer. */
   ask?: string
+  /** The turn's complete answer, where this machine kept it (local agents). What the reader shows. */
+  fullText?: string
 }
 
 export interface CableHostWiring {
@@ -886,7 +889,8 @@ export class DaemonCableHost implements CableHost {
       ? this.wiring.recent(agentId, 3)
       : await this.fleet!.recentSummaries(this.machineOf(agentId), agentId)
     return raw
-      .map((r) => ({ recap: extendShortRecap(r?.recap ?? '', r?.text ?? ''), text: r?.text ?? '', ask: r?.ask ?? '' }))
+      // The reader gets the whole answer where it is kept; the clipped body is what the recap extends from.
+      .map((r) => ({ recap: extendShortRecap(r?.recap ?? '', r?.text ?? ''), text: r?.fullText ? deriveReaderText(r.fullText) : r?.text ?? '', ask: r?.ask ?? '' }))
       .filter((s) => s.recap || s.text || s.ask)
   }
 
