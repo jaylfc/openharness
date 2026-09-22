@@ -11,8 +11,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
-import { CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
-import { CableSession, type CableAgent, type CableHost, type CableMachine, type CablePort } from './cableSession.js'
+import { CABLE_MAX_PAYLOAD, CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
+import { CableSession, fitText, type CableAgent, type CableHost, type CableMachine, type CablePort } from './cableSession.js'
 import { DialLog } from './dialLog.js'
 
 /** A port whose two ends are both in this process. */
@@ -2285,5 +2285,23 @@ describe('spoken output search purpose', () => {
       expect(selectPassage).toHaveBeenLastCalledWith({op:'cancel',agentId:'a2',selectionId:'search-one',revision:3})
       expect(port.types()).not.toContain('voice.search'); expect(host.sendTurn).not.toHaveBeenCalled()
     } finally {await session.stop()}
+  })
+})
+
+describe('fitText', () => {
+  it('leaves a summary that fits alone', () => {
+    const msg = { t: 'summary', agentId: 'a1', recap: 'r', text: 'short answer' }
+    expect(fitText(msg)).toBe(msg)
+  })
+
+  it('cuts a long answer to one frame, marks the cut, and never splits a letter', () => {
+    const text = 'Tiếng Việt có dấu, "quoted"\n'.repeat(600)
+    const fitted = fitText({ t: 'summary', agentId: 'a1', recap: 'r', text })
+    expect(Buffer.byteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(CABLE_MAX_PAYLOAD)
+    expect(fitted.text.endsWith('…')).toBe(true)
+    expect(fitted.text).not.toContain('\uFFFD')
+    expect(text.startsWith(fitted.text.slice(0, -1))).toBe(true)
+    // Close to the cap, not far under it: the reader loses as little as it can.
+    expect(Buffer.byteLength(JSON.stringify(fitted))).toBeGreaterThan(CABLE_MAX_PAYLOAD - 64)
   })
 })
