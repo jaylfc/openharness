@@ -19,6 +19,10 @@ class NativeClipboard {
 
   /// Reads the system clipboard for an image, returned as PNG bytes.
   ///
+  /// EMPTY bytes (iOS, Android) mean an image IS on the clipboard but could not be read or
+  /// re-encoded — so a caller can say "unreadable" rather than "nothing there". Every existing call
+  /// site already treats empty as "no image".
+  ///
   /// Returns `null` on any platform without a native handler for this channel (Windows — the
   /// runner is unexercised, see CLAUDE.md) or when the clipboard genuinely holds no image, so call
   /// sites can use one check to fall through to today's text-paste behavior either way.

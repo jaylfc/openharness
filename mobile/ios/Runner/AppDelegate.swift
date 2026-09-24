@@ -36,11 +36,14 @@ enum ClipboardImageChannel {
         result(FlutterStandardTypedData(bytes: png))
         return
       }
-      guard let image = pasteboard.image else { result(nil); return }
+      // From here an image IS on the clipboard, so a failure answers EMPTY bytes rather than nil:
+      // Dart then says the image is unreadable instead of that there is nothing to paste.
+      let unreadable = FlutterStandardTypedData(bytes: Data())
+      guard let image = pasteboard.image else { result(unreadable); return }
       DispatchQueue.global(qos: .userInitiated).async {
         let png = image.pngData()
         DispatchQueue.main.async {
-          result(png.map { FlutterStandardTypedData(bytes: $0) })
+          result(png.map { FlutterStandardTypedData(bytes: $0) } ?? unreadable)
         }
       }
     }
