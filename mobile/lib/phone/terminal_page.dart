@@ -1347,15 +1347,28 @@ class _TerminalPageState extends State<TerminalPage>
       if (mounted) messenger?.showSnackBar(SnackBar(content: Text(message)));
     }
 
+    // The same guard the desktop's paste keeps: reading the clipboard crosses a platform boundary
+    // and can wait on the system's permission prompt, and in that time the page can have been
+    // swiped away, its pane replaced, or its stream reconnected or taken over. A paste lands only in
+    // the stream the person tapped Paste on.
+    final streamId = session.streamId;
+    bool stillOwnsPaste() =>
+        mounted &&
+        widget.isActive &&
+        identical(_paneSession(), session) &&
+        session.acceptsInput &&
+        session.streamId == streamId;
+    const changed =
+        'The terminal changed before the paste, so nothing was sent.';
+
     final machine = widget.notifier.stateOf(widget.machineId);
     try {
       if (await Clipboard.hasStrings()) {
         final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
         // Empty here is a refused prompt as often as an empty string: nothing to say about either.
         if (text == null || text.isEmpty) return;
-        // Re-checked after the read, which can wait on the system's permission prompt.
-        if (!session.acceptsInput) {
-          report('The terminal is no longer accepting input.');
+        if (!stillOwnsPaste()) {
+          report(changed);
           return;
         }
         // The same choice the desktop's paste makes: one atomic paste frame where the machine's
@@ -1374,9 +1387,21 @@ class _TerminalPageState extends State<TerminalPage>
       return;
     }
 
+    // A plain shell, not an agent: the CLI delivers an image by replaying Ctrl+V, which a shell
+    // reads as quoted-insert — the desktop skips image paste there for the same reason.
+    if (session.engineId == 'terminal') {
+      report('There is no text on the clipboard.');
+      return;
+    }
     final imageBytes = await NativeClipboard.readImagePng();
-    if (imageBytes == null || imageBytes.isEmpty) {
+    if (imageBytes == null) {
       report('There is nothing on the clipboard to paste.');
+      return;
+    }
+    // Empty is the native side saying an image IS there but could not be read — see
+    // [NativeClipboard.readImagePng].
+    if (imageBytes.isEmpty) {
+      report("The clipboard's image isn't one this phone can read.");
       return;
     }
     if (machine == null || !machine.terminalImagePasteAvailable) {
@@ -1391,8 +1416,8 @@ class _TerminalPageState extends State<TerminalPage>
       case ImageTranscodeTooLarge():
         report('That image is too large to send, even scaled down.');
       case ImageTranscodeOk(:final pngBytes):
-        if (!session.acceptsInput) {
-          report('The terminal is no longer accepting input.');
+        if (!stillOwnsPaste()) {
+          report(changed);
           return;
         }
         if (!await session.pasteImage(pngBytes)) {
@@ -1400,6 +1425,14 @@ class _TerminalPageState extends State<TerminalPage>
         }
     }
   }
+
+  /// This page's pane's session as the notifier has it now — null once the pane is gone.
+  TerminalSession? _paneSession() => widget.notifier.panes
+      .where(
+        (p) => p.machineId == widget.machineId && p.agentId == widget.agentId,
+      )
+      .firstOrNull
+      ?.session;
 
   /// Restarting is a round trip that can fail, and the phone has no status rail to fail into — so
   /// the answer lands as a snackbar, which is the one surface a pushed page here always has.
