@@ -1347,6 +1347,18 @@ class _TerminalPageState extends State<TerminalPage>
       if (mounted) messenger?.showSnackBar(SnackBar(content: Text(message)));
     }
 
+    // The same guard the desktop's paste keeps: reading the clipboard crosses a platform boundary
+    // and can wait on the system's permission prompt, and in that time the page can have been
+    // swiped away, its pane replaced, or its stream reconnected or taken over. A paste lands only in
+    // the stream the person tapped Paste on.
+    final streamId = session.streamId;
+    bool stillOwnsPaste() =>
+        mounted &&
+        widget.isActive &&
+        identical(_paneSession(), session) &&
+        session.acceptsInput &&
+        session.streamId == streamId;
+
     final String? text;
     try {
       text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
@@ -1358,9 +1370,8 @@ class _TerminalPageState extends State<TerminalPage>
       report('There is no text on the clipboard.');
       return;
     }
-    // Re-checked after the read, which can wait on the system's permission prompt.
-    if (!session.acceptsInput) {
-      report('The terminal is no longer accepting input.');
+    if (!stillOwnsPaste()) {
+      report('The terminal changed before the paste, so nothing was sent.');
       return;
     }
     // The same choice the desktop's paste makes: one atomic paste frame where the machine's CLI
@@ -1374,6 +1385,14 @@ class _TerminalPageState extends State<TerminalPage>
       session.terminal.paste(text);
     }
   }
+
+  /// This page's pane's session as the notifier has it now — null once the pane is gone.
+  TerminalSession? _paneSession() => widget.notifier.panes
+      .where(
+        (p) => p.machineId == widget.machineId && p.agentId == widget.agentId,
+      )
+      .firstOrNull
+      ?.session;
 
   /// Restarting is a round trip that can fail, and the phone has no status rail to fail into — so
   /// the answer lands as a snackbar, which is the one surface a pushed page here always has.
