@@ -1,0 +1,81 @@
+name: Mobile (Mac)
+
+# Builds and checks the phone app (mobile/) on the self-hosted Mac mini: the only machine here with
+# Xcode, so the only place the iOS runner's Swift (mobile/ios/Runner/*.swift) is ever compiled
+# before it reaches a device. The same job builds Android, whose Kotlin nothing else compiles
+# either. Setting the machine up: docs/ci/mac-runner.md.
+#
+# ⚠️ **A self-hosted runner executes whatever the PR's code says, on a real computer.** This
+# repository is public, so two guards keep a stranger's code off it:
+#
+#  - `pull_request`, never `pull_request_target`: the job runs with a read-only token and no
+#    secrets. There are no secrets here to leak in any case.
+#  - The job-level `if:` below runs a PR only when its branch lives in THIS repository. A fork's PR
+#    is skipped outright rather than left to the fork-approval setting: approval is one click, and
+#    an approved run executes the fork's code on the Mac like any other. A fork's change is checked
+#    by pushing it to a branch here (or Actions -> Run workflow on that branch) after reading it.
+#
+# Each step after `pub get` runs even when an earlier one failed (`!cancelled()`), so one red run
+# says everything at once: whether it analyses, whether each platform builds, and which tests fail.
+on:
+  pull_request:
+    paths:
+      - 'mobile/**'
+      - '.github/workflows/mobile-mac.yml'
+  # Any branch, by hand: Actions -> Mobile (Mac) -> Run workflow.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One Mac: a newer push to the same PR replaces the run still building the old one.
+  group: mobile-mac-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # `openharness-mac` is the label that picks THIS machine; the others are the runner's defaults.
+    runs-on: [self-hosted, macOS, ARM64, openharness-mac]
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Nothing under mobile/ is in LFS, and the Mac need not have git-lfs installed.
+          lfs: false
+
+      # The toolchain is the Mac's own (Flutter, Xcode, JDK, Android SDK) — see docs/ci/mac-runner.md
+      # for the PATH the runner is given. Printed first so a red run shows what it built with.
+      - name: Toolchain
+        run: |
+          flutter --version
+          xcodebuild -version
+          java -version 2>&1 | head -1
+          echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+
+      - name: Dependencies
+        run: flutter pub get
+
+      # Infos are not fatal: the vendored third_party/xterm carries a dozen of them, and they are
+      # its upstream's style, not this app's.
+      - name: Analyze
+        if: ${{ !cancelled() }}
+        run: flutter analyze --no-fatal-infos
+
+      # Debug and unsigned: this proves the native code compiles and links. Nothing is signed or
+      # uploaded, so no certificate or profile ever has to live on the runner.
+      - name: Build iOS
+        if: ${{ !cancelled() }}
+        run: flutter build ios --debug --no-codesign
+
+      - name: Build Android
+        if: ${{ !cancelled() }}
+        run: flutter build apk --debug --target-platform android-arm64
+
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: flutter test

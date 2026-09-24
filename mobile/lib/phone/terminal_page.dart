@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import 'package:harness_mobile/clipboard/native_clipboard.dart';
 import 'package:harness_mobile/core/models.dart' show AgentProject;
 import 'package:harness_mobile/shared/theme/app_theme.dart';
 import 'package:harness_mobile/shared/widgets/app_icon_button.dart';
@@ -1139,6 +1140,7 @@ class _TerminalPageState extends State<TerminalPage>
                                 machineName: machine?.machine.displayName ?? '',
                                 agentName: agent.name,
                                 project: agent.project,
+                                session: session,
                               ),
                             ),
                         ],
@@ -1224,6 +1226,7 @@ class _TerminalPageState extends State<TerminalPage>
     required String machineName,
     required String agentName,
     AgentProject? project,
+    TerminalSession? session,
   }) {
     showPhoneSheet(
       context,
@@ -1238,7 +1241,19 @@ class _TerminalPageState extends State<TerminalPage>
       sections: [
         PhoneSheetSection(
           caption: 'Agent',
-          actions: [..._agentActions(agentName)],
+          actions: [
+            // First, because it is the one used mid-conversation: iOS has no paste gesture on a
+            // terminal (long-press is selection there), and the soft keyboard has no paste key.
+            // Hidden rather than dimmed while the stream is read-only — reclaiming is the header's
+            // job, and a paste that silently goes nowhere is worse than no row.
+            if (session != null && session.acceptsInput)
+              PhoneSheetAction(
+                icon: LucideIcons.clipboardPaste300,
+                label: 'Paste',
+                onTap: () => unawaited(_pasteClipboard(session)),
+              ),
+            ..._agentActions(agentName),
+          ],
         ),
         PhoneSheetSection(
           caption: 'App',
@@ -1318,6 +1333,106 @@ class _TerminalPageState extends State<TerminalPage>
       ),
     ),
   ];
+
+  /// Pastes the clipboard into the agent: its text as one paste rather than as typing, or — when
+  /// there is no text — its image, the same upload the key bar's image button makes.
+  ///
+  /// Text is asked about first with [Clipboard.hasStrings], which iOS answers without its "Allow
+  /// Paste" prompt, so the person is asked once, for the one thing actually read. Unlike the
+  /// desktop's ⌘V there is no Ctrl+V fallthrough: the agent runs on another machine, whose engine
+  /// would read THAT machine's clipboard rather than this phone's.
+  Future<void> _pasteClipboard(TerminalSession session) async {
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    void report(String message) {
+      if (mounted) messenger?.showSnackBar(SnackBar(content: Text(message)));
+    }
+
+    // The same guard the desktop's paste keeps: reading the clipboard crosses a platform boundary
+    // and can wait on the system's permission prompt, and in that time the page can have been
+    // swiped away, its pane replaced, or its stream reconnected or taken over. A paste lands only in
+    // the stream the person tapped Paste on.
+    final streamId = session.streamId;
+    bool stillOwnsPaste() =>
+        mounted &&
+        widget.isActive &&
+        identical(_paneSession(), session) &&
+        session.acceptsInput &&
+        session.streamId == streamId;
+    const changed =
+        'The terminal changed before the paste, so nothing was sent.';
+
+    final machine = widget.notifier.stateOf(widget.machineId);
+    try {
+      if (await Clipboard.hasStrings()) {
+        final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+        // Empty here is a refused prompt as often as an empty string: nothing to say about either.
+        if (text == null || text.isEmpty) return;
+        if (!stillOwnsPaste()) {
+          report(changed);
+          return;
+        }
+        // The same choice the desktop's paste makes: one atomic paste frame where the machine's
+        // CLI knows it, otherwise xterm's own paste (bracketed when the program asked for it).
+        if (machine != null && machine.terminalPasteRawAvailable) {
+          if (!await session.pasteText(text)) {
+            report('The paste could not be sent.');
+          }
+        } else {
+          session.terminal.paste(text);
+        }
+        return;
+      }
+    } on PlatformException {
+      report('Could not read the clipboard.');
+      return;
+    }
+
+    // A plain shell, not an agent: the CLI delivers an image by replaying Ctrl+V, which a shell
+    // reads as quoted-insert — the desktop skips image paste there for the same reason.
+    if (session.engineId == 'terminal') {
+      report('There is no text on the clipboard.');
+      return;
+    }
+    final imageBytes = await NativeClipboard.readImagePng();
+    if (imageBytes == null) {
+      report('There is nothing on the clipboard to paste.');
+      return;
+    }
+    // Empty is the native side saying an image IS there but could not be read — see
+    // [NativeClipboard.readImagePng].
+    if (imageBytes.isEmpty) {
+      report("The clipboard's image isn't one this phone can read.");
+      return;
+    }
+    if (machine == null || !machine.terminalImagePasteAvailable) {
+      report("This machine's harness is too old to receive images.");
+      return;
+    }
+    // Through the same transcode as a picked photo: a clipboard image is as often a full-size
+    // camera shot as a screenshot, and it has to be scaled under the upload's ceiling either way.
+    switch (await transcodeToPng(imageBytes)) {
+      case ImageTranscodeUnreadable():
+        report("The clipboard's image isn't one this phone can read.");
+      case ImageTranscodeTooLarge():
+        report('That image is too large to send, even scaled down.');
+      case ImageTranscodeOk(:final pngBytes):
+        if (!stillOwnsPaste()) {
+          report(changed);
+          return;
+        }
+        if (!await session.pasteImage(pngBytes)) {
+          report('The image could not be sent.');
+        }
+    }
+  }
+
+  /// This page's pane's session as the notifier has it now — null once the pane is gone.
+  TerminalSession? _paneSession() => widget.notifier.panes
+      .where(
+        (p) => p.machineId == widget.machineId && p.agentId == widget.agentId,
+      )
+      .firstOrNull
+      ?.session;
 
   /// Restarting is a round trip that can fail, and the phone has no status rail to fail into — so
   /// the answer lands as a snackbar, which is the one surface a pushed page here always has.
