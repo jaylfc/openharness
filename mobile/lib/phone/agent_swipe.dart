@@ -81,9 +81,9 @@ class _AgentSwipeHostState extends State<AgentSwipeHost> {
     agentId: widget.agentId,
   );
 
-  /// Every agent this pager attached and has not closed yet — the one on screen, the two attached
-  /// ahead of a swipe ([_prefetchAround]), and the ones just left, until [_pruner]'s beat has
-  /// passed.
+  /// Every agent this pager attached and has not closed yet: the one on screen and the one a swipe
+  /// either side ([_prefetchAround]). Nothing is kept for having been visited — an agent that falls
+  /// out of that ring is on here only until [_pruner]'s beat after the swipe closes it.
   ///
   /// ⚠️ **Without this the pager leaks terminals.** The phone's old rule was one pane, enforced by
   /// closing every other one on the way in; a pager attaches its own pages, so nothing else would
