@@ -7,7 +7,6 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-import 'package:harness_mobile/clipboard/native_clipboard.dart';
 import 'package:harness_mobile/core/models.dart' show AgentProject;
 import 'package:harness_mobile/shared/theme/app_theme.dart';
 import 'package:harness_mobile/shared/widgets/app_icon_button.dart';
@@ -1334,70 +1333,45 @@ class _TerminalPageState extends State<TerminalPage>
     ),
   ];
 
-  /// Pastes the clipboard into the agent: its text as one paste rather than as typing, or — when
-  /// there is no text — its image, the same upload the key bar's image button makes.
+  /// Pastes the clipboard's text into the agent, as one paste rather than as typing.
   ///
-  /// Text is asked about first with [Clipboard.hasStrings], which iOS answers without its "Allow
-  /// Paste" prompt, so the person is asked once, for the one thing actually read. Unlike the
+  /// Text only: Flutter's [Clipboard] reads `text/plain` and nothing else, and the native image
+  /// reader is desktop-only — a picture goes through the key bar's image button instead. Unlike the
   /// desktop's ⌘V there is no Ctrl+V fallthrough: the agent runs on another machine, whose engine
   /// would read THAT machine's clipboard rather than this phone's.
+  ///
+  /// iOS asks before handing the clipboard over; a refusal reads back as empty.
   Future<void> _pasteClipboard(TerminalSession session) async {
     final messenger = ScaffoldMessenger.maybeOf(context);
     void report(String message) {
       if (mounted) messenger?.showSnackBar(SnackBar(content: Text(message)));
     }
 
-    final machine = widget.notifier.stateOf(widget.machineId);
+    final String? text;
     try {
-      if (await Clipboard.hasStrings()) {
-        final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
-        // Empty here is a refused prompt as often as an empty string: nothing to say about either.
-        if (text == null || text.isEmpty) return;
-        // Re-checked after the read, which can wait on the system's permission prompt.
-        if (!session.acceptsInput) {
-          report('The terminal is no longer accepting input.');
-          return;
-        }
-        // The same choice the desktop's paste makes: one atomic paste frame where the machine's
-        // CLI knows it, otherwise xterm's own paste (bracketed when the program asked for it).
-        if (machine != null && machine.terminalPasteRawAvailable) {
-          if (!await session.pasteText(text)) {
-            report('The paste could not be sent.');
-          }
-        } else {
-          session.terminal.paste(text);
-        }
-        return;
-      }
+      text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
     } on PlatformException {
       report('Could not read the clipboard.');
       return;
     }
-
-    final imageBytes = await NativeClipboard.readImagePng();
-    if (imageBytes == null || imageBytes.isEmpty) {
-      report('There is nothing on the clipboard to paste.');
+    if (text == null || text.isEmpty) {
+      report('There is no text on the clipboard.');
       return;
     }
-    if (machine == null || !machine.terminalImagePasteAvailable) {
-      report("This machine's harness is too old to receive images.");
+    // Re-checked after the read, which can wait on the system's permission prompt.
+    if (!session.acceptsInput) {
+      report('The terminal is no longer accepting input.');
       return;
     }
-    // Through the same transcode as a picked photo: a clipboard image is as often a full-size
-    // camera shot as a screenshot, and it has to be scaled under the upload's ceiling either way.
-    switch (await transcodeToPng(imageBytes)) {
-      case ImageTranscodeUnreadable():
-        report("The clipboard's image isn't one this phone can read.");
-      case ImageTranscodeTooLarge():
-        report('That image is too large to send, even scaled down.');
-      case ImageTranscodeOk(:final pngBytes):
-        if (!session.acceptsInput) {
-          report('The terminal is no longer accepting input.');
-          return;
-        }
-        if (!await session.pasteImage(pngBytes)) {
-          report('The image could not be sent.');
-        }
+    // The same choice the desktop's paste makes: one atomic paste frame where the machine's CLI
+    // knows it, otherwise xterm's own paste (bracketed when the program asked for it).
+    final machine = widget.notifier.stateOf(widget.machineId);
+    if (machine != null && machine.terminalPasteRawAvailable) {
+      if (!await session.pasteText(text)) {
+        report('The paste could not be sent.');
+      }
+    } else {
+      session.terminal.paste(text);
     }
   }
 
