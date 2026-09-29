@@ -984,5 +984,43 @@ void main() {
       );
       expect(app.deskSyncForTest.pending, isEmpty);
     });
+    test('a stale untitled desk copy under the tab\'s own old id is that tab, not another', () async {
+      final storage = MemoryStore();
+      final store = PaneLayoutStore(storage: storage);
+      await store.saveSwarms([
+        Swarm(id: 'store', name: Swarm.storeName, kind: 'store'),
+        Swarm(id: 'swarm-6', name: 'openharness', nameIsCustom: false)
+          ..titleMachineId = 'm'
+          ..titleAgentId = 'a0'
+          ..panes.add(TerminalPane(id: 1, machineId: 'm', agentId: 'a0')),
+      ], 'swarm-6');
+      final minted = newDeskId();
+      final api = _DeskApi()
+        ..doc = DeskDoc(
+          revision: 105,
+          tabs: [
+            tab('swarm-6', name: 'Untitled Tab', agents: ['a0']),
+            tab(minted, name: 'openharness', agents: ['a0']),
+          ],
+        );
+      final app = createApp(store: storage)..api = api;
+      addTearDown(app.dispose);
+      await app.restorePaneLayoutForTest();
+      await app.deskStartForTest();
+      final mine = [
+        for (final s in app.swarms)
+          if (s.panes.any((p) => p.agentId == 'a0')) s,
+      ];
+      expect(mine, hasLength(1));
+      expect(mine.single.id, 'swarm-6');
+      expect(mine.single.name, 'openharness');
+      expect(app.activeSwarm, same(mine.single));
+      expect(
+        api.doc!.tabs
+            .where((t) => t.panes.any((p) => p.agentId == 'a0'))
+            .map((t) => t.id),
+        ['swarm-6'],
+      );
+    });
   });
 }
