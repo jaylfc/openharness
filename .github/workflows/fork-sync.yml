@@ -1,0 +1,550 @@
+name: Fork sync
+
+# The fork's release channel: rebase the patch stack onto upstream, test, build, and publish a GitHub
+# Release plus the manifests the installed apps poll. See fork/README.md for the whole design.
+#
+#   schedule          daily; does NOTHING unless the repository variable FORK_AUTOSYNC is 'true'
+#   workflow_dispatch run on demand from the default branch (harness-fork). Inputs:
+#                       force    rebuild and release even if neither upstream nor the stack moved
+#                       publish  false = do everything except publish (a rehearsal)
+#   push              to fork-ops-dev only: DRY mode. Builds everything, publishes ONLY to a prerelease
+#                     tagged dryrun-* and to the branch fork-updates-dryrun; never rebases or pushes
+#                     harness-fork, never touches fork-updates.
+#
+# Nothing here is a tag trigger, and no tag it creates matches upstream's release triggers (v*_desktop,
+# v*_cli, ...): releases are fork-yyyymmdd-n and dryrun-n.
+
+on:
+  schedule:
+    - cron: '17 4 * * *'   # 04:17 UTC, off the hour on purpose (the top of the hour is when runners queue)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Release even if upstream and the patch stack are unchanged since the last build'
+        type: boolean
+        default: false
+      publish:
+        description: 'Publish the release and manifests (false = build and test only)'
+        type: boolean
+        default: true
+  push:
+    branches: [fork-ops-dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two runs interleaving would write the manifest branch twice from different plans. Never cancelled:
+  # a half-finished publish is worse than a queued one. Dry and real runs do not block each other.
+  group: fork-sync-${{ github.ref_name == 'fork-ops-dev' && 'dry' || 'real' }}
+  cancel-in-progress: false
+
+jobs:
+  # 1. Rebase the stack onto upstream (real runs), or just pin the commit under test (dry runs).
+  sync:
+    name: Sync with upstream
+    if: github.event_name != 'schedule' || vars.FORK_AUTOSYNC == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+      skip: ${{ steps.result.outputs.skip }}
+      source_sha: ${{ steps.result.outputs.source_sha }}
+      upstream_sha: ${{ steps.result.outputs.upstream_sha }}
+    steps:
+      - id: mode
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          case "$REF_NAME" in
+            fork-ops-dev) mode=dry ;;
+            harness-fork) mode=real ;;
+            *) echo "::error::this workflow releases from harness-fork (or rehearses on fork-ops-dev); it was started on '$REF_NAME'"; exit 1 ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Mode: **$mode**" >> "$GITHUB_STEP_SUMMARY"
+
+      # A fine-grained token is required for real runs: the default GITHUB_TOKEN cannot push commits that
+      # touch .github/workflows, and a rebased stack contains exactly that whenever upstream edits a
+      # workflow. Failing here, first, costs seconds and says what to do.
+      - name: Require FORK_SYNC_TOKEN
+        if: steps.mode.outputs.mode == 'real'
+        env:
+          TOKEN: ${{ secrets.FORK_SYNC_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error title=FORK_SYNC_TOKEN is not set::Add a fine-grained personal access token (this repository only; Contents, Workflows and Issues read/write) as the Actions secret FORK_SYNC_TOKEN. See the go-live checklist in fork/README.md."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.mode.outputs.mode == 'real' && 'harness-fork' || github.sha }}
+          fetch-depth: 0
+          token: ${{ steps.mode.outputs.mode == 'real' && secrets.FORK_SYNC_TOKEN || github.token }}
+
+      - name: Git identity for the rebase
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
+
+      - name: Rebase harness-fork onto upstream
+        id: rebase
+        if: steps.mode.outputs.mode == 'real'
+        env:
+          FORCE: ${{ inputs.force }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash fork/scripts/sync.sh
+
+      # Dry runs never move harness-fork, but they can still rehearse the rebase: does the stack under
+      # test apply on today's upstream? Informational, in a scratch worktree.
+      - name: Rehearse the rebase (dry run)
+        if: steps.mode.outputs.mode == 'dry'
+        run: |
+          set -uo pipefail
+          git remote add upstream https://github.com/autonomous-ai/openharness.git
+          git fetch --quiet upstream main
+          echo "upstream main: $(git rev-parse upstream/main)"
+          git worktree add --detach "$RUNNER_TEMP/rehearsal" HEAD >/dev/null
+          cd "$RUNNER_TEMP/rehearsal"
+          if git rebase upstream/main >/dev/null 2>&1; then
+            echo "The stack under test rebases cleanly onto upstream main." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::The stack under test does not rebase cleanly onto today's upstream main: $(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+            git rebase --abort
+          fi
+
+      - id: result
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          REBASE_SKIP: ${{ steps.rebase.outputs.skip }}
+          REBASE_SOURCE: ${{ steps.rebase.outputs.source_sha }}
+          REBASE_UPSTREAM: ${{ steps.rebase.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = real ]; then
+            skip="$REBASE_SKIP"; source="$REBASE_SOURCE"; upstream="$REBASE_UPSTREAM"
+          else
+            skip=false; source="$GITHUB_SHA"
+            upstream="$(git ls-remote https://github.com/autonomous-ai/openharness.git refs/heads/main | cut -f1)"
+          fi
+          { echo "skip=$skip"; echo "source_sha=$source"; echo "upstream_sha=$upstream"; } >> "$GITHUB_OUTPUT"
+          if [ "$skip" = true ]; then echo "Nothing to release: upstream and the stack are unchanged since the last build." >> "$GITHUB_STEP_SUMMARY"; fi
+
+  # 2. Work out versions and names once, so every build stamps the same numbers.
+  plan:
+    name: Plan versions
+    needs: sync
+    if: needs.sync.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ needs.sync.outputs.mode }}
+      plan: ${{ steps.versions.outputs.plan }}
+      tag: ${{ steps.versions.outputs.tag }}
+      channel_branch: ${{ steps.versions.outputs.channel_branch }}
+      channel_base: ${{ steps.versions.outputs.channel_base }}
+      desktop_manifest_url: ${{ steps.versions.outputs.desktop_manifest_url }}
+      desktop_version: ${{ steps.versions.outputs.desktop_version }}
+      cli_version: ${{ steps.versions.outputs.cli_version }}
+      firmware_version: ${{ steps.versions.outputs.firmware_version }}
+      has_firmware: ${{ steps.tree.outputs.has_firmware }}
+      flutter_version: ${{ steps.tool.outputs.flutter_version }}
+      appimagetool: ${{ steps.tool.outputs.appimagetool }}
+      node_version: ${{ steps.tool.outputs.node_version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.sync.outputs.source_sha }}
+
+      - id: tool
+        run: bash fork/scripts/toolchain.sh | tee -a "$GITHUB_OUTPUT"
+
+      - id: tree
+        run: |
+          if [ -f devices/harness-device/firmware/CMakeLists.txt ]; then echo "has_firmware=true" >> "$GITHUB_OUTPUT"
+          else echo "has_firmware=false" >> "$GITHUB_OUTPUT"; echo "::notice::no firmware directory in this tree; the dial firmware is skipped"; fi
+
+      - id: versions
+        env:
+          MODE: ${{ needs.sync.outputs.mode }}
+          REPO: ${{ github.repository }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          # The fork channels are read from git, not raw.githubusercontent.com: raw is cached for about
+          # five minutes, and a run starting inside that window would plan from the previous release.
+          bases=()
+          for b in fork-updates $([ "$MODE" = dry ] && echo fork-updates-dryrun); do
+            if git fetch --quiet --depth 1 origin "$b" 2>/dev/null; then
+              git worktree add --detach "$RUNNER_TEMP/$b" FETCH_HEAD >/dev/null
+              bases+=(--fork-base "$RUNNER_TEMP/$b/harness")
+            fi
+          done
+          python3 fork/scripts/plan_versions.py "${bases[@]}" --out plan.json | tee -a "$GITHUB_STEP_SUMMARY"
+
+          if [ "$MODE" = dry ]; then
+            channel=fork-updates-dryrun
+            tag="dryrun-$RUN_NUMBER"; [ "$RUN_ATTEMPT" = 1 ] || tag="$tag-$RUN_ATTEMPT"
+          else
+            channel=fork-updates
+            day="$(date -u +%Y%m%d)"
+            n=$(( $(git ls-remote --tags origin "refs/tags/fork-$day-*" | wc -l) + 1 ))
+            tag="fork-$day-$n"
+          fi
+          base="https://raw.githubusercontent.com/$REPO/$channel/harness"
+          {
+            echo "plan=$(python3 -c 'import json;print(json.dumps(json.load(open("plan.json")),separators=(",",":")))')"
+            echo "tag=$tag"
+            echo "channel_branch=$channel"
+            echo "channel_base=$base"
+            echo "desktop_manifest_url=$base/desktop/metadata.json"
+            for c in desktop cli firmware; do echo "${c}_version=$(python3 -c "import json;print(json.load(open('plan.json'))['$c']['version'])")"; done
+          } >> "$GITHUB_OUTPUT"
+          echo "Release **$tag** to \`$channel\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # 3. Tests that gate everything.
+  test:
+    name: Test
+    needs: [sync, plan]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.sync.outputs.source_sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ needs.plan.outputs.node_version }}
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+
+      - run: npm ci --no-audit --no-fund
+        working-directory: cli
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p .
+        working-directory: cli
+
+      # The cable suite covers the firmware push and the dial link the fork's patches live in; the fork
+      # specs prove the real updater code accepts a manifest exactly as the fork publishes it.
+      - name: CLI tests (cable + update channel)
+        run: |
+          set -euo pipefail
+          (cd cli && npx vitest run src/cable)
+          bash fork/scripts/run_cli_specs.sh
+
+      - name: Fork script tests
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s fork/tests -v
+          bash fork/tests/test_sync.sh
+
+      # Cheap and only when it matters: analyze the Dart files the patch stack changed relative to upstream.
+      - name: Which Dart files changed
+        id: dart
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/autonomous-ai/openharness.git
+          git fetch --quiet upstream main
+          base="$(git merge-base HEAD upstream/main)"
+          files="$(git diff --name-only --diff-filter=AM "$base" HEAD -- 'desktop/*.dart' | sed 's#^desktop/##' | tr '\n' ' ')"
+          echo "changed Dart files: ${files:-none}"
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+      - uses: ./fork/actions/setup-flutter
+        if: steps.dart.outputs.files != ''
+        with:
+          version: ${{ needs.plan.outputs.flutter_version }}
+      - name: Analyze the changed Dart files
+        if: steps.dart.outputs.files != ''
+        working-directory: desktop
+        env:
+          FILES: ${{ steps.dart.outputs.files }}
+        run: |
+          flutter pub get
+          # shellcheck disable=SC2086
+          flutter analyze $FILES
+
+  # 4. Builds. Each uploads its artifacts under asset-*; publish gathers them.
+  build-cli:
+    name: Build CLI
+    needs: [sync, plan, test]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.sync.outputs.source_sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ needs.plan.outputs.node_version }}
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: cli
+      - run: bash fork/scripts/build_cli.sh "${{ needs.plan.outputs.cli_version }}" "$RUNNER_TEMP/out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-cli
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS (arm64)
+    needs: [sync, plan, test]
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.sync.outputs.source_sha }}
+      - uses: ./fork/actions/setup-flutter
+        with:
+          version: ${{ needs.plan.outputs.flutter_version }}
+      - run: flutter pub get
+        working-directory: desktop
+      - name: Build, ad-hoc sign and zip
+        run: bash fork/scripts/build_macos.sh "${{ needs.plan.outputs.desktop_version }}" "$RUNNER_TEMP/out" "${{ needs.plan.outputs.desktop_manifest_url }}"
+
+      # The zip is what gets installed, so it is the zip that has to launch: unpack it the way the updater
+      # does and run it. A signature the OS rejects kills a process within a second or two; surviving
+      # ten means dyld, the code signature and Flutter's startup all accepted it.
+      - name: Launch the packaged app
+        run: |
+          set -uo pipefail
+          d="$(mktemp -d)"
+          ditto -x -k "$RUNNER_TEMP/out/Harness-macos-arm64.zip" "$d"
+          "$d/Harness.app/Contents/MacOS/Harness" > "$d/launch.log" 2>&1 &
+          pid=$!
+          sleep 12
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "the packaged app is still running after 12s"
+            kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+          else
+            wait "$pid"; echo "::error::the packaged app exited early (status $?)"; tail -40 "$d/launch.log"; exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-macos
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+
+  build-linux:
+    name: Build Linux (${{ matrix.arch }})
+    needs: [sync, plan, test]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # flutter build linux cannot cross-compile, so each architecture needs its own host.
+          - { runner: ubuntu-24.04, arch: x64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.sync.outputs.source_sha }}
+      - name: Install the Linux desktop toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev
+      - uses: ./fork/actions/setup-flutter
+        with:
+          version: ${{ needs.plan.outputs.flutter_version }}
+      - run: flutter pub get
+        working-directory: desktop
+      - name: Download appimagetool
+        env:
+          APPIMAGETOOL_VERSION: ${{ needs.plan.outputs.appimagetool }}
+          APPIMAGE_ARCH: ${{ matrix.arch == 'arm64' && 'aarch64' || 'x86_64' }}
+        run: |
+          set -euo pipefail
+          curl -fL "https://github.com/AppImage/appimagetool/releases/download/${APPIMAGETOOL_VERSION}/appimagetool-${APPIMAGE_ARCH}.AppImage" -o "$RUNNER_TEMP/appimagetool"
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          echo "APPIMAGETOOL=$RUNNER_TEMP/appimagetool" >> "$GITHUB_ENV"
+      - name: Build and package
+        run: bash fork/scripts/build_linux.sh "${{ needs.plan.outputs.desktop_version }}" "$RUNNER_TEMP/out" "${{ needs.plan.outputs.desktop_manifest_url }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+
+  build-firmware:
+    name: Build dial firmware
+    needs: [sync, plan, test]
+    if: needs.plan.outputs.has_firmware == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    container:
+      image: espressif/idf:v5.5.1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.sync.outputs.source_sha }}
+      - name: Trust the workspace
+        run: git config --global --add safe.directory '*'
+      # The IDF component manager downloads LVGL and the panel drivers; dependencies.lock pins them, so the
+      # key changes only when the pins do.
+      - uses: actions/cache@v4
+        with:
+          path: devices/harness-device/firmware/managed_components
+          key: idf-components-${{ hashFiles('devices/harness-device/firmware/dependencies.lock') }}
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh" >/dev/null
+          bash fork/scripts/build_firmware.sh "${{ needs.plan.outputs.firmware_version }}" "$RUNNER_TEMP/out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asset-firmware
+          path: ${{ runner.temp }}/out/*
+          if-no-files-found: error
+
+  # 5. Publish: release and assets first, then the manifests in one commit.
+  publish:
+    name: Publish
+    needs: [sync, plan, test, build-cli, build-macos, build-linux, build-firmware]
+    # A skipped firmware build (no firmware in the tree) is fine; a failed one is not. `!cancelled()` so
+    # the skipped job does not skip this one, and an explicit failure check so a red build blocks it.
+    if: >-
+      ${{ !cancelled()
+      && needs.plan.result == 'success'
+      && !contains(needs.*.result, 'failure')
+      && (github.event_name != 'workflow_dispatch' || inputs.publish) }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.sync.outputs.source_sha }}
+          fetch-depth: 0
+      - name: Git identity for the manifest commit
+        run: |
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
+          git remote add upstream https://github.com/autonomous-ai/openharness.git
+          git fetch --quiet upstream main
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: asset-*
+          path: ${{ runner.temp }}/assets
+          merge-multiple: true
+      - name: Publish the release, then the manifests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          CHANNEL_BRANCH: ${{ needs.plan.outputs.channel_branch }}
+          SOURCE_SHA: ${{ needs.sync.outputs.source_sha }}
+          UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+          PRERELEASE: ${{ needs.plan.outputs.mode == 'dry' }}
+          PLAN_JSON: ${{ needs.plan.outputs.plan }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$PLAN_JSON" > "$RUNNER_TEMP/plan.json"
+          PLAN="$RUNNER_TEMP/plan.json" ASSETS="$RUNNER_TEMP/assets" bash fork/scripts/publish_channel.sh
+          {
+            echo "Published **$TAG**"
+            echo
+            echo "Manifests: \`${{ needs.plan.outputs.channel_base }}/{desktop,cli,esp32/ota}/metadata.json\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # 6. Check what was published the way a client sees it. A failure here does not undo the release (there
+  # is no undo; see fork/README.md, Rollback) but it is loud.
+  verify:
+    name: Verify (${{ matrix.name }})
+    needs: [plan, sync, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x64, runner: ubuntu-24.04, kind: linux, arch: x64 }
+          - { name: linux-arm64, runner: ubuntu-24.04-arm, kind: linux, arch: arm64 }
+          - { name: macos-arm64, runner: macos-15, kind: macos, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.sync.outputs.source_sha }}
+
+      - name: Every artifact the manifests name downloads and matches its sha256
+        env:
+          BASE: ${{ needs.plan.outputs.channel_base }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: python3 fork/scripts/verify_channel.py --base "$BASE" --tag "$TAG" --out "$RUNNER_TEMP/verified"
+
+      # (d) The AppImage's version.txt must match the manifest, read out of the published file.
+      - name: AppImage version.txt matches the manifest
+        if: matrix.kind == 'linux'
+        env:
+          ARCH: ${{ matrix.arch }}
+          WANT: ${{ needs.plan.outputs.desktop_version }}
+        run: |
+          set -euo pipefail
+          f="$RUNNER_TEMP/verified/desktop-linux-$ARCH"
+          chmod +x "$f"
+          cd "$RUNNER_TEMP" && "$f" --appimage-extract usr/bin/version.txt >/dev/null
+          got="$(cat squashfs-root/usr/bin/version.txt)"
+          echo "AppImage ($ARCH) usr/bin/version.txt = $got, manifest version = $WANT" | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$got" = "$WANT" ]
+
+      # (c) The macOS zip as the updater unpacks it.
+      - name: macOS bundle version, signature and unpack
+        if: matrix.kind == 'macos'
+        env:
+          WANT: ${{ needs.plan.outputs.desktop_version }}
+        run: bash fork/scripts/verify_macos.sh "$RUNNER_TEMP/verified/desktop-macos-arm64" "$WANT" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # (b) The real clients against the published manifests.
+      - uses: actions/setup-node@v7
+        if: matrix.name == 'linux-x64'
+        with:
+          node-version: ${{ needs.plan.outputs.node_version }}
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - name: CLI updater and firmware offer accept the published manifests
+        if: matrix.name == 'linux-x64'
+        env:
+          FORK_MANIFEST_BASE: ${{ needs.plan.outputs.channel_base }}
+        run: |
+          set -euo pipefail
+          (cd cli && npm ci --no-audit --no-fund)
+          bash fork/scripts/run_cli_specs.sh
+
+      - uses: ./fork/actions/setup-flutter
+        if: matrix.name != 'linux-arm64'
+        with:
+          version: ${{ needs.plan.outputs.flutter_version }}
+      - name: Desktop updater accepts the published manifest and stages the artifact
+        if: matrix.name != 'linux-arm64'
+        env:
+          FORK_DESKTOP_MANIFEST_URL: ${{ needs.plan.outputs.desktop_manifest_url }}?t=${{ github.run_id }}
+          FORK_EXPECT_VERSION: ${{ needs.plan.outputs.desktop_version }}
+          FORK_STAGE: '1'
+        run: |
+          set -euo pipefail
+          (cd desktop && flutter pub get)
+          bash fork/scripts/run_desktop_channel_test.sh
