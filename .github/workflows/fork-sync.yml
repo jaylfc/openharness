@@ -394,7 +394,8 @@ jobs:
   build-firmware:
     name: Build dial firmware
     needs: [sync, plan, test]
-    if: needs.plan.outputs.has_firmware == 'true'
+    # The variable FORK_FIRMWARE=false switches the dial image off (see fork/README.md, go-live step 4).
+    if: needs.plan.outputs.has_firmware == 'true' && vars.FORK_FIRMWARE != 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:

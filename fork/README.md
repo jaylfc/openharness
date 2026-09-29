@@ -121,7 +121,7 @@ Do these in order. Nothing above needs to change in the repository.
    `.github/workflows/fork-sync.yml` (cherry-pick from `fork-ops-dev`; they only touch `fork/`, the
    workflow file, and the two channel-patched files). Then Settings, General, Default branch. Do not
    copy tags from upstream to the fork (see 5).
-2. **Enable Issues** (Settings, General, Features). Forks have them off, and the "Fork rebase blocked"
+2. **Enable Issues** (Settings, General, Features). Forks have them off (they are off today), and the "Fork rebase blocked"
    report is an issue. Without it the failed run is the only alert.
 3. **Create the token and the secret.** A fine-grained personal access token, resource owner `jaylfc`,
    repository access limited to `jaylfc/openharness`, permissions: Contents read and write, Workflows read
@@ -129,10 +129,19 @@ Do these in order. Nothing above needs to change in the repository.
    cannot push commits that touch `.github/workflows`, which a rebased stack does whenever upstream edits a
    workflow. A run without the secret fails first and says so.) Set an expiry you will remember; an
    expired token makes the daily run fail at the checkout.
-4. **Turn the schedule on.** Settings, Secrets and variables, Actions, Variables: `FORK_AUTOSYNC` = `true`.
+4. **Decide about the dial firmware before the first release.** The image is built from this tree, which
+   is ahead of what upstream last published: upstream's published `commander` 0.0.86 (built 24 Sep, LVGL
+   UI, 3.2 MB) predates upstream commit `977638b2`, which deleted LVGL and the Pro sources and moved to
+   the habitat renderer; the image built from current main is about 0.9 MB. The fork is therefore the
+   first channel to offer the post-LVGL firmware, and once the CLI is on the fork channel the daemon
+   offers it to a dial running an older clean release. It was built and its `esp_app_desc` version
+   checked, but never flashed to hardware in this work. To hold it back, set the repository variable
+   `FORK_FIRMWARE` to `false` (the dial job is skipped and no `commander` entry is published; a previous
+   entry is kept). Remove the variable when you are ready.
+5. **Turn the schedule on.** Settings, Secrets and variables, Actions, Variables: `FORK_AUTOSYNC` = `true`.
    Before that the cron does nothing. To release once by hand first: Actions, Fork sync, Run workflow,
    `force` on.
-5. **Disable the upstream workflows that must not fire on the fork.** After step 1 GitHub registers the
+6. **Disable the upstream workflows that must not fire on the fork.** After step 1 GitHub registers the
    inherited files; then `fork/scripts/disable_upstream_workflows.sh` lists what it would do and
    `--apply` does it. The list, from an audit of every `on:` trigger:
    - `release-desktop.yml` (tag `v*_desktop`), `release.yml` (tag `v*_cli`), `release-web.yml` (tag
@@ -147,9 +156,9 @@ Do these in order. Nothing above needs to change in the repository.
    - `mobile-mac.yml`: left on the fork's old `main`, needs a self-hosted runner.
    - `ci.yml` is manual-only and harmless. There is no other `schedule`, `workflow_run` or
      `repository_dispatch` trigger. `fork-sync.yml` uses none of the tag patterns above.
-6. **Check the first run.** Watch it to the `verify` jobs. The first fork release is `fork-<date>-1`.
+7. **Check the first run.** Watch it to the `verify` jobs. The first fork release is `fork-<date>-1`.
 
-If you ever change the fork's name, update the URLs in `cli/src/config/env.ts` (baked into the CLI) and the
+If you ever rename the fork, update the URLs in `cli/src/config/env.ts` (baked into the CLI) and the
 `repo` you dispatch against; the workflow itself uses `github.repository`.
 
 ## Moving an installed app onto the fork channel, once
@@ -164,7 +173,8 @@ then on:
 ADAPTER_UPDATE_URL=https://raw.githubusercontent.com/jaylfc/openharness/fork-updates/harness/cli/metadata.json harness update
 ```
 
-`harness update` reads that variable, so it stops the daemon, swaps the bundle, and relaunches it on the new
+`harness update` reads that variable (the launcher `install.sh` writes just execs `node cli.js`, so the
+environment passes straight through), so it stops the daemon, swaps the bundle, and relaunches it on the new
 bytes. `--force` is only needed to replace a build made by `install-cli.sh` (a `-dev` build); such a build
 also carries `ADAPTER_UPDATE_DISABLE=true` in its launcher and will not follow the fork on its own. For a
 machine that has no CLI yet, install upstream's with its `install.sh` and run the line above.
@@ -239,6 +249,16 @@ bash fork/scripts/run_cli_specs.sh                        # real CLI updater and
 FORK_DESKTOP_MANIFEST_URL=<url> bash fork/scripts/run_desktop_channel_test.sh   # real DesktopUpdater
 ```
 
+Dry-run output is for testing only. Prereleases `dryrun-<n>` and the branch `fork-updates-dryrun` carry
+version numbers that keep climbing (a dry run plans against both channels) and will be HIGHER than the
+first real release, and a desktop app built by a dry run polls `fork-updates-dryrun` for ever. Do not
+install them on a machine you care about; delete the prereleases when you are done.
+
+One trap when working on these scripts locally: if the checkout has a git remote named `upstream`,
+`gh` treats it as the repository to act on. An early run of this pipeline did exactly that and tried to
+create its release on the upstream project (refused with a 403). The scripts therefore fetch upstream by
+URL, never add the remote, and set `GH_REPO` before calling `gh`; keep doing the same.
+
 Scripts are Python 3 (stdlib only) for JSON and Bash for git and packaging. They fail loudly with a message
 that says what to do.
 
@@ -248,6 +268,11 @@ that says what to do.
 - The dial (`commander`) is the only firmware image built. The firmware build is a production build
   (`DEVICE_FORCE_PROD=1`) and ignores any local `provisioned_config.h`, as upstream's release does; anything
   the WiFi transport needs at runtime has to come from provisioning, not from that header.
+- Issues are disabled on the fork today, so the "Fork rebase blocked" issue cannot be opened until they
+  are switched on; the rebase-conflict path was proven with a stubbed `gh`, and the run itself still
+  fails loudly. Real-mode runs (rebase, push with the token, the `fork-updates` branch, the schedule)
+  cannot run until `harness-fork` is the default branch and the secret exists; only dry runs have been
+  exercised.
 - Ad-hoc signing (above). Not notarized.
 - The manifests are plain files on a branch: no cache control, five minutes of edge caching.
 - A failed `verify` job does not undo a release. It is the alarm; the remedy is a newer version.
