@@ -297,6 +297,13 @@ that says what to do.
   fails loudly. Real-mode runs (rebase, push with the token, the `fork-updates` branch, the schedule)
   cannot run until `harness-fork` is the default branch and the secret exists; only dry runs have been
   exercised.
+- Upstream's firmware host tests (`devices/harness-device/firmware/test/run.sh`) run in the firmware job
+  but are informational: they are developed on macOS, need `-Werror` dropped and gnu11 on Ubuntu's gcc, and
+  `test_cable_identity.py` fails on the unmodified upstream tree there. The rest of the suite, including
+  the LAN transport tests, runs and passes.
+- Right after a publish, raw.githubusercontent.com can answer with the old or the new manifest on
+  consecutive requests for a short while. The pipeline's checks wait for it to settle; installed apps just
+  see the update on a later poll.
 - Ad-hoc signing (above). Not notarized.
 - The manifests are plain files on a branch: no cache control, five minutes of edge caching.
 - A failed `verify` job does not undo a release. It is the alarm; the remedy is a newer version.
