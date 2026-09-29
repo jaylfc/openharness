@@ -1,0 +1,40 @@
+name: Set up Flutter
+description: >-
+  The pinned Flutter SDK on any runner the fork builds on. Flutter publishes no linux-arm64 SDK archive,
+  so flutter-action has nothing to download there; that runner clones the same tag instead (the route
+  upstream's release-desktop.yml takes) and precaches the same artifacts.
+
+inputs:
+  version:
+    description: Flutter version, read from upstream's release-desktop.yml by fork/scripts/toolchain.sh
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: subosito/flutter-action@v2
+      if: runner.os == 'macOS' || runner.arch == 'X64'
+      with:
+        flutter-version: ${{ inputs.version }}
+        channel: stable
+        cache: true
+
+    - name: Install Flutter from git (no linux-arm64 archive exists)
+      if: runner.os == 'Linux' && runner.arch == 'ARM64'
+      shell: bash
+      env:
+        FLUTTER_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+        echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+
+    - name: Verify the toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        flutter --version
+        if [ "$RUNNER_OS" = Linux ]; then flutter precache --linux; fi
+        # Swift Package Manager must be on BEFORE pub get: with it off the build falls back to CocoaPods
+        # and rewrites tracked files under macos/ (upstream's release-desktop.yml, and desktop/CLAUDE.md).
+        if [ "$RUNNER_OS" = macOS ]; then flutter config --enable-swift-package-manager; fi

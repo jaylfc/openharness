@@ -1,0 +1,2 @@
+# created by scripts/run_cli_specs.sh so the specs resolve vitest from the CLI install
+tests/node_modules
