@@ -4,8 +4,9 @@
 # That suite is developed on macOS with clang and compiles everything with -Werror. On Ubuntu's gcc the
 # unmodified upstream tree already trips a -Wformat-truncation warning in ui/habitat/terminal.c, so the
 # suite fails there for a reason that has nothing to do with the code under test. A `cc` shim that drops
-# -Werror keeps every assertion, and the sanitizers, and only stops a compiler difference from blocking a
-# release. Real failures (a test that runs and fails) still fail this script.
+# -Werror, and asks for gnu11 instead of c11 (a test uses getline/ssize_t, which strict c11 hides on
+# glibc), keeps every assertion and the sanitizers while stopping a compiler difference from failing
+# the run. Real failures (a test that runs and fails) still fail this script.
 #
 # Run where the ESP-IDF environment is exported (IDF_PATH set), so the tests that link the SDK's cJSON run
 # as well. Usage: firmware_host_tests.sh
@@ -17,7 +18,7 @@ RUN="$ROOT/devices/harness-device/firmware/test/run.sh"
 shim="$(mktemp -d)"; trap 'rm -rf "$shim"' EXIT
 cat > "$shim/cc" <<'SHIM'
 #!/usr/bin/env bash
-args=(); for a in "$@"; do [ "$a" = -Werror ] || args+=("$a"); done
+args=(); for a in "$@"; do case "$a" in -Werror) ;; -std=c11) args+=(-std=gnu11) ;; *) args+=("$a") ;; esac; done
 exec gcc "${args[@]}"
 SHIM
 chmod +x "$shim/cc"
