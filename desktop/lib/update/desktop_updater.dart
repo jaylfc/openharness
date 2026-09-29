@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:cryptography/cryptography.dart';
@@ -251,10 +252,18 @@ class DesktopUpdater {
       if (_parseSemverCore(running) == null) {
         return const DesktopUpdateCheck.failed();
       }
-      final response = await _dio.get<Map<String, dynamic>>(
+      // Decoded here rather than left to Dio: Dio only parses a JSON body when the response says it is
+      // JSON, and a manifest served from GitHub (raw.githubusercontent.com sends every file as text/plain)
+      // would otherwise arrive as a String and fail on every check.
+      final response = await _dio.get<Object?>(
         _metadataUrlForInstance,
+        options: Options(responseType: ResponseType.plain),
       );
-      final newest = _newestEntry(response.data);
+      final body = response.data;
+      final decoded = body is String ? jsonDecode(body) : body;
+      final newest = _newestEntry(
+        decoded is Map ? Map<String, dynamic>.from(decoded) : null,
+      );
       if (newest == null) return const DesktopUpdateCheck.failed();
       return semverGt(newest.version, running)
           ? DesktopUpdateCheck.available(newest)
