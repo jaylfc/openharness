@@ -1,0 +1,18 @@
+{
+  "source_sha": "6627924739bd02f5be95de00869065e527264314",
+  "upstream_sha": "7e8e373311c0d25a291f5b014f6219664123b2db",
+  "tag": "dryrun-3",
+  "built_at": "2026-09-29T16:25:33Z",
+  "versions": {
+    "desktop": "1.2.28",
+    "cli": "0.3.28",
+    "firmware": "0.0.87"
+  },
+  "entries_updated": [
+    "desktop-macos-arm64",
+    "desktop-linux-x64",
+    "desktop-linux-arm64",
+    "cli",
+    "commander"
+  ]
+}

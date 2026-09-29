@@ -1,0 +1,20 @@
+{
+  "desktop-macos-arm64": {
+    "version": "1.2.28",
+    "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-3/Harness-macos-arm64.zip",
+    "sha256": "14c9516cf03a432bd014622819f3cff364354767b902f1e283f2e9ee89708d30",
+    "size": 45910535
+  },
+  "desktop-linux-x64": {
+    "version": "1.2.28",
+    "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-3/Harness-linux-x64.AppImage",
+    "sha256": "d043f91114d0efb0d0f523734dc70894c048ddf6c36954e4f5ef5a6e2f0b9ef9",
+    "size": 30882296
+  },
+  "desktop-linux-arm64": {
+    "version": "1.2.28",
+    "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-3/Harness-linux-arm64.AppImage",
+    "sha256": "f8937cd5ff0967e091bcd3e3c99712bb428322e59aba22a6dca265c2fb6cf47c",
+    "size": 30398984
+  }
+}
