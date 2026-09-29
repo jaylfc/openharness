@@ -1,0 +1,44 @@
+# A Flatpak of the Linux desktop app, packed from an already built Flutter bundle: the manifest does
+# not build Flutter, it installs what `flutter build linux --release` produced. The bundle directory
+# is `bundle/` beside this file (the workflow copies it in). Built by
+# .github/workflows/desktop-linux-fork-flatpak.yml.
+#
+# The GNOME runtime, not org.freedesktop.Platform: Flutter's Linux embedder draws through GTK 3, which
+# the freedesktop runtime does not carry.
+app-id: com.autonomous.harness
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+command: harness
+finish-args:
+  # The window: Wayland, with X11 as the fallback; GPU for Flutter's renderer.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # The relay, the store, model providers and remote machines are all reached over the network.
+  - --share=network
+  # ~/.harness (state, logs, the daemon's socket, managed runtimes), the projects an agent works in
+  # and ~/.ssh live under the home directory; a narrower grant would hide them from the app.
+  - --filesystem=home
+  # ssh to other machines uses the host's agent.
+  - --socket=ssh-auth
+  # Desktop notifications.
+  - --talk-name=org.freedesktop.Notifications
+modules:
+  - name: harness
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/harness-app /app/bin /app/share/applications /app/share/icons/hicolor/512x512/apps
+      - cp -a bundle/. /app/harness-app/
+      - ln -s ../harness-app/harness /app/bin/harness
+      - install -Dm644 harness.png /app/share/icons/hicolor/512x512/apps/com.autonomous.harness.png
+      - install -Dm644 com.autonomous.harness.desktop /app/share/applications/com.autonomous.harness.desktop
+    sources:
+      - type: dir
+        path: bundle
+        dest: bundle
+      - type: file
+        path: com.autonomous.harness.desktop
+      - type: file
+        path: harness.png

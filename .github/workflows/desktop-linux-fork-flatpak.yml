@@ -1,0 +1,88 @@
+name: Desktop Linux fork Flatpak
+
+# An unsigned aarch64 Flatpak bundle of a branch, on the fork's own hosted arm64 runner. Not a
+# release: nothing is uploaded anywhere but the run's artifacts (kept 14 days), no manifest is written.
+#
+#   git push fork HEAD:omarchy-flatpak            # builds it
+#   Actions -> Desktop Linux fork Flatpak -> Run workflow
+#
+# The Flutter bundle is built exactly as desktop-linux-fork-build.yml builds it (updates pinned off the
+# same way, the same stamped version), then desktop/linux/flatpak/com.autonomous.harness.yml wraps it.
+
+on:
+  push:
+    branches: ['omarchy-flatpak']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: '3.47.2'
+  STAMPED_VERSION: '1.2.99'
+
+jobs:
+  build-flatpak:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the Linux desktop toolchain and Flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
+            flatpak flatpak-builder
+
+      # Flutter publishes no linux-arm64 SDK archive; see release-desktop.yml.
+      - name: Install Flutter from git
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$FLUTTER_VERSION" \
+            https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+
+      - run: |
+          flutter --version
+          flutter precache --linux
+          flutter pub get
+
+      - name: Build
+        run: |
+          flutter build linux --release \
+            --dart-define=DESKTOP_UPDATE_METADATA_URL="https://storage.googleapis.com/s3-autonomous-upgrade-3/harness/desktop-internal/no-updates.json"
+
+      - name: Stage the bundle
+        run: |
+          set -euo pipefail
+          bundle=build/linux/arm64/release/bundle
+          [ -x "$bundle/harness" ] || { echo "::error::no harness executable in $bundle"; exit 1; }
+          echo "$STAMPED_VERSION" > "$bundle/version.txt"
+          file "$bundle/harness"
+          stage="$RUNNER_TEMP/flatpak"
+          mkdir -p "$stage"
+          cp linux/flatpak/com.autonomous.harness.yml linux/flatpak/com.autonomous.harness.desktop linux/harness.png "$stage/"
+          cp -a "$bundle" "$stage/bundle"
+          echo "STAGE=$stage" >> "$GITHUB_ENV"
+
+      - name: Build the Flatpak
+        run: |
+          set -euo pipefail
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          cd "$STAGE"
+          flatpak-builder --user --arch=aarch64 --force-clean --install-deps-from=flathub \
+            --repo=repo build com.autonomous.harness.yml
+          flatpak build-bundle --arch=aarch64 repo Harness-linux-aarch64.flatpak com.autonomous.harness
+          file Harness-linux-aarch64.flatpak
+          sha256sum Harness-linux-aarch64.flatpak
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Harness-linux-aarch64-flatpak
+          path: ${{ env.STAGE }}/Harness-linux-aarch64.flatpak
+          retention-days: 14
+          if-no-files-found: error

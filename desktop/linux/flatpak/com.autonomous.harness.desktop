@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Harness
+Comment=Attach terminals to the agents running on your Harness machines
+Exec=harness
+Icon=com.autonomous.harness
+Categories=Development;
+Terminal=false
