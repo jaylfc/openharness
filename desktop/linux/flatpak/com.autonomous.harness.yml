@@ -30,9 +30,9 @@ modules:
     buildsystem: simple
     # Installed as built. Stripping would rewrite the AOT snapshot in libapp.so, which is not an
     # ordinary ELF program to strip, and there is no source to debug against.
-    no-debuginfo: true
     build-options:
       strip: false
+      no-debuginfo: true
     build-commands:
       - mkdir -p /app/harness-app /app/bin /app/share/applications /app/share/icons/hicolor/512x512/apps
       - cp -a bundle/. /app/harness-app/
