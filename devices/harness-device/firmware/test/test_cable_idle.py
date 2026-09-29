@@ -41,7 +41,7 @@ static int usb_serial_jtag_read_bytes(uint8_t *out, size_t cap, int wait) {
 }
 static void tick(void *ctx) { assert(!ctx); ticks++; }
 static void collect(uint8_t version, uint8_t type, const uint8_t *p, size_t n, void *ctx) {
-    assert(!ctx && version == CABLE_FRAME_VERSION && type == CABLE_TYPE_JSON);
+    assert(cable_xport_of(ctx) == CABLE_XPORT_USB && version == CABLE_FRAME_VERSION && type == CABLE_TYPE_JSON);
     assert(n == expected_size && !memcmp(p, expected, n)); frames++;
 }
 ''' + reader + r'''
