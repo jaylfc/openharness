@@ -87,10 +87,13 @@ int main(void) {
         uint16_t canvas=color(HT_THEME_CANVAS);
         unsigned r=canvas>>11, g=(canvas>>5)&63, b=canvas&31;
         r=(r<<3)|(r>>2); g=(g<<2)|(g>>4); b=(b<<3)|(b>>2);
-        assert(r==g && g==b && r<=24);
-        if(percent==25)assert(r==8);
-        if(percent==60)assert(r==16);
-        if(percent==100)assert(r==24 && color(HT_THEME_TEXT)==ht_rgb(HT_THEME_TEXT));
+        // Whatever the canvas is (charcoal upstream, black on this fork), it stays exactly neutral and is
+        // exactly the brightness-scaled gray, snapped to RGB565's steps of 8. The old checkpoints fall out
+        // of the same rule: 0x18 gives 8, 16 and 24 at 25, 60 and 100 percent.
+        unsigned want=((((HT_THEME_CANVAS&255u)*(unsigned)percent+400u)/800u)*8u);
+        assert(r==g && g==b && r<=(HT_THEME_CANVAS&255u));
+        assert(r==want);
+        if(percent==100)assert(r==(HT_THEME_CANVAS&255u) && color(HT_THEME_TEXT)==ht_rgb(HT_THEME_TEXT));
     }
     puts("Brightness: 101 app-set percentages survive a reboot exactly, 256 stored bytes load bounded and monotonic, neutral canvas throughout PASS");
 }
