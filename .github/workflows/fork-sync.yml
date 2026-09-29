@@ -236,12 +236,31 @@ jobs:
         run: npx tsc --noEmit -p .
         working-directory: cli
 
-      # The cable suite covers the firmware push and the dial link the fork's patches live in; the fork
-      # specs prove the real updater code accepts a manifest exactly as the fork publishes it.
-      - name: CLI tests (cable + update channel)
+      # What the patch stack changed relative to upstream decides what else runs. Fetched by URL into a
+      # tracking ref, deliberately NOT added as a remote: `gh` picks a remote named upstream as the
+      # repository to act on, and this workflow must only ever write to this one.
+      - name: What the stack changed
+        id: changed
         run: |
           set -euo pipefail
-          (cd cli && npx vitest run src/cable)
+          git fetch --quiet https://github.com/autonomous-ai/openharness.git +main:refs/remotes/upstream/main
+          base="$(git merge-base HEAD upstream/main)"
+          specs="$(git diff --name-only --diff-filter=AM "$base" HEAD -- 'cli/src/*.spec.ts' 'cli/src/*.test.ts' | sed 's#^cli/##' | tr '\n' ' ')"
+          files="$(git diff --name-only --diff-filter=AM "$base" HEAD -- 'desktop/*.dart' | sed 's#^desktop/##' | tr '\n' ' ')"
+          echo "changed CLI specs: ${specs:-none}"
+          echo "changed Dart files: ${files:-none}"
+          { echo "specs=$specs"; echo "files=$files"; } >> "$GITHUB_OUTPUT"
+
+      # The cable suite covers the firmware push and the dial link; the specs the stack added or edited
+      # run with it (a patch's own tests are part of the gate); the fork specs prove the real updater
+      # code accepts a manifest exactly as the fork publishes it.
+      - name: CLI tests (cable + the stack's own specs + update channel)
+        env:
+          SPECS: ${{ steps.changed.outputs.specs }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          (cd cli && npx vitest run src/cable $SPECS)
           bash fork/scripts/run_cli_specs.sh
 
       - name: Fork script tests
@@ -251,27 +270,16 @@ jobs:
           bash fork/tests/test_sync.sh
           bash fork/tests/test_publish.sh
 
-      # Cheap and only when it matters: analyze the Dart files the patch stack changed relative to upstream.
-      - name: Which Dart files changed
-        id: dart
-        run: |
-          set -euo pipefail
-          # Fetched by URL into a tracking ref, deliberately NOT added as a remote: `gh` picks a remote
-          # named upstream as the repository to act on, and this workflow must only ever write to this one.
-          git fetch --quiet https://github.com/autonomous-ai/openharness.git +main:refs/remotes/upstream/main
-          base="$(git merge-base HEAD upstream/main)"
-          files="$(git diff --name-only --diff-filter=AM "$base" HEAD -- 'desktop/*.dart' | sed 's#^desktop/##' | tr '\n' ' ')"
-          echo "changed Dart files: ${files:-none}"
-          echo "files=$files" >> "$GITHUB_OUTPUT"
+      # Cheap and only when it matters: analyze the Dart files the patch stack changed.
       - uses: ./fork/actions/setup-flutter
-        if: steps.dart.outputs.files != ''
+        if: steps.changed.outputs.files != ''
         with:
           version: ${{ needs.plan.outputs.flutter_version }}
       - name: Analyze the changed Dart files
-        if: steps.dart.outputs.files != ''
+        if: steps.changed.outputs.files != ''
         working-directory: desktop
         env:
-          FILES: ${{ steps.dart.outputs.files }}
+          FILES: ${{ steps.changed.outputs.files }}
         run: |
           flutter pub get
           # shellcheck disable=SC2086
@@ -414,6 +422,15 @@ jobs:
         with:
           path: devices/harness-device/firmware/managed_components
           key: idf-components-${{ hashFiles('devices/harness-device/firmware/dependencies.lock') }}
+      # Upstream's own host tests for the firmware (plain cc + python3; the ones that need the SDK's cJSON
+      # run because IDF_PATH is set here). They gate the image: a stack that changes the dial link is
+      # where they earn their keep.
+      - name: Firmware host tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh" >/dev/null
+          bash devices/harness-device/firmware/test/run.sh
       - name: Build
         shell: bash
         run: |
