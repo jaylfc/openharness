@@ -41,6 +41,12 @@ cc -std=c11 -Wall -Wextra -Werror -O1 \
    -o "$out/test_cable_machines" "$here/test_cable_machines.c" "$here/../main/cable_machines.c"
 "$out/test_cable_machines"
 
+# The optional LAN transport's pure logic: the bind token, and (below, with the SDK's cJSON) wifi.set.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -I "$here/../main" -o "$out/test_lan_bind" "$here/test_lan_bind.c" "$here/../main/lan_bind.c"
+"$out/test_lan_bind"
+python3 "$here/test_lan_transport.py"
+
 # Which dial this image is on, decided from who answered on the I2C bus. Two boards ship on one image;
 # the table that tells them apart is arithmetic on a list of addresses, so it is proved here.
 cc -std=c11 -Wall -Wextra -Werror -O1 \
@@ -207,6 +213,12 @@ if [[ -n "${IDF_PATH:-}" ]]; then
         -o "$out/test_cable_scroll" "$here/test_cable_scroll.c" \
         "$here/../main/cable_scroll.c" "$IDF_PATH/components/json/cJSON/cJSON.c"
     "$out/test_cable_scroll"
+    cc -std=c11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+        -I "$here/../main" -I "$IDF_PATH/components/json/cJSON" \
+        -o "$out/test_lan_wifi_msg" "$here/test_lan_wifi_msg.c" \
+        "$here/../main/lan_wifi_msg.c" "$IDF_PATH/components/json/cJSON/cJSON.c"
+    "$out/test_lan_wifi_msg"
+    python3 "$here/test_lan_session.py"
     python3 "$here/test_cable_json_parse.py"
     python3 "$here/test_cable_identity.py"
     python3 "$here/test_cable_models.py"
