@@ -191,6 +191,11 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    -o "$out/test_draft" "$here/test_draft.c" "$here/../main/ui/habitat/draft.c"
 "$out/test_draft"
 
+# Shake to open the menu (fork only): the pure double-shake detector, the keyboard and the menu table.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -o "$out/test_shake_detect" "$here/test_shake_detect.c" "$here/../main/shake_detect.c" -lm
+"$out/test_shake_detect"
+
 python3 "$here/test_search_ui.py"
 python3 "$here/test_draft_ui.py"
 python3 "$here/test_question_ui.py"
