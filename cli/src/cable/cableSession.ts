@@ -927,6 +927,10 @@ export class CableSession {
           // matters after a dial reboot that lands mid-session on a remote selection.
           selected: this.host.selectedMachine(),
           voiceLang: this.host.voiceLang(),
+          // The computer's clock and UTC offset, for a device with a clock face and no network time of
+          // its own (the CoreS3 keeps them in its RTC). The round dial ignores both.
+          now: Date.now(),
+          tzOffsetMin: -new Date().getTimezoneOffset(),
           // Optional controls must be advertised: a new dial can remain useful
           // with an older daemon instead of waiting on commands it ignores.
           features: [
