@@ -249,6 +249,7 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s fork/tests -v
           bash fork/tests/test_sync.sh
+          bash fork/tests/test_publish.sh
 
       # Cheap and only when it matters: analyze the Dart files the patch stack changed relative to upstream.
       - name: Which Dart files changed

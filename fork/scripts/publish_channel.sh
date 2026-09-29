@@ -81,7 +81,8 @@ work="$(mktemp -d)"
 git worktree add --detach "$work" >/dev/null
 trap 'git worktree remove --force "$work" 2>/dev/null || true' EXIT
 if git fetch --quiet origin "$CHANNEL_BRANCH" 2>/dev/null; then
-  git -C "$work" checkout --quiet --detach FETCH_HEAD
+  # FETCH_HEAD belongs to the main checkout; a worktree cannot see it, so resolve it to a sha here.
+  git -C "$work" checkout --quiet --detach "$(git rev-parse FETCH_HEAD)"
   parent="$(git -C "$work" rev-parse HEAD)"
 else
   echo ">> $CHANNEL_BRANCH does not exist yet; creating it as an orphan"

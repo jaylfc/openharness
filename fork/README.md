@@ -234,6 +234,7 @@ Push to `fork-ops-dev`; it is a dry run. Useful locally:
 python3 fork/scripts/plan_versions.py --fork-base https://raw.githubusercontent.com/jaylfc/openharness/fork-updates/harness
 python3 -m unittest discover -s fork/tests                # version rule and manifest generator
 bash fork/tests/test_sync.sh                              # rebase, no-op, conflict and issue paths, on scratch repos
+bash fork/tests/test_publish.sh                           # release then manifests, orphan branch, refusals, stub gh
 bash fork/scripts/run_cli_specs.sh                        # real CLI updater and firmware offer on a fixture channel
 FORK_DESKTOP_MANIFEST_URL=<url> bash fork/scripts/run_desktop_channel_test.sh   # real DesktopUpdater
 ```
