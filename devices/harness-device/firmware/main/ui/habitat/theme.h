@@ -1,10 +1,12 @@
 #pragma once
 
-// One charcoal surface, two neutral inks, one companion/action accent.
-// Canvas matches the desktop terminal pane and Cmd N / Cmd P surfaces.
+// One black surface, two neutral inks, one companion/action accent.
+// Canvas is TRUE black: the panel is AMOLED, where a black pixel is simply off. It draws no power, has
+// no backlight glow to lift it, and gives the inks their full contrast. (Upstream uses charcoal
+// #181818 to match the desktop terminal pane; this fork trades that match for the glass.)
 // All colors are RGB565-representable at full brightness. Conversion and the
 // existing saved brightness setting remain at the UI boundary; no theme heap.
-#define HT_THEME_CANVAS    0x181818u
+#define HT_THEME_CANVAS    0x000000u
 // The Focus skin's canvas. Its design (mockup/newdesign.html, every screen) is on black, not on the
 // terminal's charcoal — Focus is the pre-habitat layout and brings its ground with it.
 #define HT_THEME_FOCUS_CANVAS 0x000000u

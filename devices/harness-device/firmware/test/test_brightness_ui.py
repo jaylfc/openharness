@@ -89,8 +89,10 @@ int main(void) {
         uint16_t canvas=color(HT_THEME_CANVAS);
         unsigned r=canvas>>11, g=(canvas>>5)&63, b=canvas&31;
         r=(r<<3)|(r>>2); g=(g<<2)|(g>>4); b=(b<<3)|(b>>2);
-        assert(r==g && g==b && r<=24);
-        assert(r==24 && color(HT_THEME_TEXT)==ht_rgb(HT_THEME_TEXT));
+        // Whatever the canvas is (charcoal upstream, black on this fork), it stays exactly neutral and
+        // unscaled: brightness is the panel's job, not the canvas's.
+        assert(r==g && g==b && r==(HT_THEME_CANVAS&255u));
+        assert(color(HT_THEME_TEXT)==ht_rgb(HT_THEME_TEXT));
         app_sets(percent);
         assert(panel_level == (percent * 255 + 50) / 100);
     }
