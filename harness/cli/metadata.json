@@ -1,13 +1,13 @@
 {
   "cli": {
-    "version": "0.3.31",
+    "version": "0.3.32",
     "cli": {
-      "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-9/cli.js",
-      "sha256": "7219e0a47307b19a60ff598d89aa0c408593fca7c8db2a9ab707179985001e56",
+      "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-12/cli.js",
+      "sha256": "e60445fac78df890592464082e54d038c1358d63c47a82724cf242ee33b298bd",
       "size": 3649821
     },
     "notify": {
-      "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-9/notify.mjs",
+      "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-12/notify.mjs",
       "sha256": "037ca3993c5e304ad1daff91749ed655aafcf6013013f99eeb6c9d5dd9a3eeaa",
       "size": 71771
     }
