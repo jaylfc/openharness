@@ -1,20 +1,20 @@
 {
   "desktop-macos-arm64": {
-    "version": "1.2.33",
-    "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-14/Harness-macos-arm64.zip",
-    "sha256": "8771762ccff553a7126d163ad737cacede4d586932c5dcc554c1a1fb28d1de99",
-    "size": 45910536
+    "version": "1.2.34",
+    "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-15/Harness-macos-arm64.zip",
+    "sha256": "b0c3b0c7d850717822b78c820f38cb7d94237bec92a4701aa100173fd91a3e41",
+    "size": 45910538
   },
   "desktop-linux-x64": {
-    "version": "1.2.33",
-    "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-14/Harness-linux-x64.AppImage",
-    "sha256": "e06142382fa9deee365a7fa6ad8e56b2046473cd28577232a999f3e729754d8f",
+    "version": "1.2.34",
+    "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-15/Harness-linux-x64.AppImage",
+    "sha256": "03bc1613798cae64c6aa945c9acba6066a2da00ef8d645a08926a3d145b14512",
     "size": 30882296
   },
   "desktop-linux-arm64": {
-    "version": "1.2.33",
-    "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-14/Harness-linux-arm64.AppImage",
-    "sha256": "a864c66ea4097f411ee0f2b1752e6392aa886b4966ce7f36fb9d34a7752c4dd7",
+    "version": "1.2.34",
+    "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-15/Harness-linux-arm64.AppImage",
+    "sha256": "a7f5f545c9e884227d6adb6117631c97ce56e210118c5e1f89641533d5d95519",
     "size": 30398984
   }
 }
