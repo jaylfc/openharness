@@ -73,6 +73,19 @@ static const char *const RESTING[] = {
     HOLD_FOR_TABS, HOLD_FOR_TABS, HOLD_FOR_TABS, HOLD_FOR_TABS, HOLD_FOR_TABS,
     TAP_THE_NAME, TAP_THE_NAME, TAP_THE_NAME, TAP_THE_NAME, TAP_THE_NAME,
 };
+/*
+ * Where the recap rows sit, for the tap target. The block is centred in its fixed area and its line
+ * count follows the recap, which this does not get, so the target is the whole area in four equal rows.
+ */
+_Static_assert(HT_CHARACTER_RECAP_ROWS == RECAP_LINES, "one row per recap line");
+int ht_focus_recap_rows(const ht_character_face_t *f, ht_rect_t *out)
+{
+    (void)f;
+    for (int i = 0; i < RECAP_LINES; i++)
+        out[i] = (ht_rect_t){RECAP_X, RECAP_AREA_Y + i * RECAP_AREA_H / RECAP_LINES, RECAP_W,
+                             RECAP_AREA_H / RECAP_LINES};
+    return RECAP_LINES;
+}
 static struct {
     bool showing;           // the last home face drawn was a resting one
     char who[64];           // ... for this recipient

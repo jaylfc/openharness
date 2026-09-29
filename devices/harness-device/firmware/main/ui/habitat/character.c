@@ -20,6 +20,8 @@ typedef struct {
      */
     void (*face)(ht_scene_t *, const ht_character_face_t *, uint8_t frame, uint16_t ink,
                  const char *recap);
+    // Where this skin puts the rows of a recap, so the tap target is the text and not a guess at it.
+    int (*recap_rows)(const ht_character_face_t *, ht_rect_t *out);
 } character_definition_t;
 
 #define PORTRAIT(name, species) \
@@ -40,21 +42,21 @@ PORTRAIT(beastie, 9)
 
 // Adding artwork changes this registry and its adapter, never the action layer.
 static const character_definition_t characters[HT_CHARACTER_COUNT] = {
-    [HT_CHARACTER_TIM] = {"Tim", ht_octopus_motion_tick, ht_octopus_draw, NULL},
-    [HT_CHARACTER_TUX] = {"Tux", ht_tux_motion_tick, ht_tux_draw, NULL},
+    [HT_CHARACTER_TIM] = {"Tim", ht_octopus_motion_tick, ht_octopus_draw, NULL, ht_character_layout_recap_rows},
+    [HT_CHARACTER_TUX] = {"Tux", ht_tux_motion_tick, ht_tux_draw, NULL, ht_character_layout_recap_rows},
     // Nothing of Focus moves, so its tick is the shared motion step with a one-frame animation; the
     // only thing that animates on it is the status shimmer, which the compositor already owns.
-    [HT_CHARACTER_FOCUS] = {"Focus", ht_focus_motion_tick, ht_focus_portrait, ht_focus_face},
-    [HT_CHARACTER_ILLUSTRATED_TIM] = {"Tim", ht_illustrated_tick, illustrated_tim, NULL},
-    [HT_CHARACTER_GNU] = {"GNU", ht_illustrated_tick, gnu, NULL},
-    [HT_CHARACTER_LYNX] = {"Lynx", ht_illustrated_tick, lynx, NULL},
-    [HT_CHARACTER_MUTT] = {"Mutt", ht_illustrated_tick, mutt, NULL},
-    [HT_CHARACTER_YAK] = {"Yak", ht_illustrated_tick, yak, NULL},
-    [HT_CHARACTER_GOPHER] = {"Gopher", ht_illustrated_tick, gopher, NULL},
-    [HT_CHARACTER_BUG] = {"Bug", ht_illustrated_tick, bug, NULL},
-    [HT_CHARACTER_ILLUSTRATED_TUX] = {"Tux", ht_illustrated_tick, illustrated_tux, NULL},
-    [HT_CHARACTER_AUK] = {"Auk", ht_illustrated_tick, auk, NULL},
-    [HT_CHARACTER_BEASTIE] = {"Beastie", ht_illustrated_tick, beastie, NULL},
+    [HT_CHARACTER_FOCUS] = {"Focus", ht_focus_motion_tick, ht_focus_portrait, ht_focus_face, ht_focus_recap_rows},
+    [HT_CHARACTER_ILLUSTRATED_TIM] = {"Tim", ht_illustrated_tick, illustrated_tim, NULL, ht_character_layout_recap_rows},
+    [HT_CHARACTER_GNU] = {"GNU", ht_illustrated_tick, gnu, NULL, ht_character_layout_recap_rows},
+    [HT_CHARACTER_LYNX] = {"Lynx", ht_illustrated_tick, lynx, NULL, ht_character_layout_recap_rows},
+    [HT_CHARACTER_MUTT] = {"Mutt", ht_illustrated_tick, mutt, NULL, ht_character_layout_recap_rows},
+    [HT_CHARACTER_YAK] = {"Yak", ht_illustrated_tick, yak, NULL, ht_character_layout_recap_rows},
+    [HT_CHARACTER_GOPHER] = {"Gopher", ht_illustrated_tick, gopher, NULL, ht_character_layout_recap_rows},
+    [HT_CHARACTER_BUG] = {"Bug", ht_illustrated_tick, bug, NULL, ht_character_layout_recap_rows},
+    [HT_CHARACTER_ILLUSTRATED_TUX] = {"Tux", ht_illustrated_tick, illustrated_tux, NULL, ht_character_layout_recap_rows},
+    [HT_CHARACTER_AUK] = {"Auk", ht_illustrated_tick, auk, NULL, ht_character_layout_recap_rows},
+    [HT_CHARACTER_BEASTIE] = {"Beastie", ht_illustrated_tick, beastie, NULL, ht_character_layout_recap_rows},
 };
 static const char *species[] = {"tim", "gnu", "lynx", "mutt", "yak", "gopher", "bug", "tux", "auk", "beastie"};
 ht_character_id_t ht_character_companion(const char *key)
@@ -151,4 +153,8 @@ void ht_character_portrait(ht_scene_t *s, const ht_character_t *c,
 {
     ht_character_face_t face = delivery_face(c, f);
     definition(c->id)->paint(s, &face, c->motion.frame, ink, size, y);
+}
+int ht_character_recap_rows(const ht_character_t *c, const ht_character_face_t *f, ht_rect_t *out)
+{
+    return definition(c->id)->recap_rows(f, out);
 }

@@ -34,6 +34,9 @@ bool ht_character_delivery_tick(ht_character_t *character, uint32_t now, bool pe
                                 uint32_t sequence, bool animate);
 void ht_character_face(ht_scene_t *scene, const ht_character_t *character,
                        const ht_character_face_t *face, uint16_t ink, const char *recap);
+// The recap's row rectangles for this skin and face, top to bottom; see ht_character_layout_recap_rows().
+int ht_character_recap_rows(const ht_character_t *character, const ht_character_face_t *face,
+                            ht_rect_t *out);
 void ht_character_portrait(ht_scene_t *scene, const ht_character_t *character,
                            const ht_character_face_t *face, uint16_t ink,
                            ht_character_size_t size, int y);

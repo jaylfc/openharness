@@ -204,6 +204,21 @@ static void recipient(ht_scene_t *s, const ht_character_face_t *f, int y)
     lines(s, y, 320, 2, &ht_mono_20, f->primary_title ? f->foreground : f->dim, f->recipient, false, NULL);
 }
 
+// Larger summaries occupy the center of the circle, with the last row above the footer. Narrow
+// lower rows keep every glyph inside the bezel.
+static const int roomy_widths[] = {408, 408, 391, 340};
+_Static_assert(sizeof roomy_widths / sizeof roomy_widths[0] == HT_CHARACTER_RECAP_ROWS, "recap rows");
+
+int ht_character_layout_recap_rows(const ht_character_face_t *f, ht_rect_t *out)
+{
+    // Only the live reading surface is a tap target; the benchmark geometries never were.
+    if (!f->roomy_reading) return 0;
+    for (int row = 0; row < HT_CHARACTER_RECAP_ROWS; row++)
+        out[row] = (ht_rect_t){(HT_WIDTH - roomy_widths[row]) / 2,
+            HT_CHARACTER_READING_TEXT_Y + row * ht_mono_28.height, roomy_widths[row], ht_mono_28.height};
+    return HT_CHARACTER_RECAP_ROWS;
+}
+
 void ht_character_layout(ht_scene_t *s, const ht_character_face_t *f, uint8_t frame, uint16_t ink,
                          const char *recap, ht_character_painter_t paint)
 {
@@ -227,9 +242,6 @@ void ht_character_layout(ht_scene_t *s, const ht_character_face_t *f, uint8_t fr
     // Keep slots stable through long titles and animation; damage stays local.
     static const int reading_widths[] = {396, 396, 384, 372, 348, 324, 276};
     static const int brief_widths[] = {372, 348, 324};
-    // Larger summaries occupy the center of the circle, with the last row above the footer. Narrow
-    // lower rows keep every glyph inside the bezel.
-    static const int roomy_widths[] = {408, 408, 391, 340};
     if (result && f->roomy_reading) recap_lines(s, HT_CHARACTER_READING_TEXT_Y,
         408, HT_CHARACTER_RECAP_ROWS, false, roomy_widths, f->foreground, recap,
         &ht_mono_28, HT_CHARACTER_RECAP_CHARS);
