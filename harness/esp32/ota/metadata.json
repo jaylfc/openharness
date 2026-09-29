@@ -1,8 +1,8 @@
 {
   "commander": {
-    "version": "0.0.89",
-    "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-6/interns_commander.bin",
-    "sha256": "d14f39ae8239d3a0388c32bb903ac4a34a36670f870c476b9b921e2b1d18e639",
+    "version": "0.0.90",
+    "url": "https://github.com/jaylfc/openharness/releases/download/dryrun-9/interns_commander.bin",
+    "sha256": "483ba2f5d1a739e4b133f26265d3c9a5694ac6a4b2dd7b2ab534fc34d642b387",
     "size": 874992
   }
 }
