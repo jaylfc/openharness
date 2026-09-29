@@ -195,6 +195,9 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -o "$out/test_shake_detect" "$here/test_shake_detect.c" "$here/../main/shake_detect.c" -lm
 "$out/test_shake_detect"
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -o "$out/test_keyboard" "$here/test_keyboard.c" "$here/../main/ui/habitat/keyboard.c"
+"$out/test_keyboard"
 
 python3 "$here/test_search_ui.py"
 python3 "$here/test_draft_ui.py"
