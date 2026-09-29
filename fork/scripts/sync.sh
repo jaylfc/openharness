@@ -14,7 +14,10 @@
 #   ISSUE_TITLE     title of the ONE issue used to report a blocked rebase
 #                                                                        (default "Fork rebase blocked")
 #   GH_REPO         owner/name for `gh`; unset = the checkout's own repo
-#   NO_ISSUE        'true' = skip the issue (local experiments without gh)
+#   NO_ISSUE        'true' = skip the issues (local experiments without gh)
+#   REVIEW_ISSUE_TITLE  title of the ONE issue listing upstream changes that overlap the patches, when the
+#                   rebase itself was clean                       (default "Fork sync: upstream overlap to review")
+#   OVERLAP_REPORT  where to write the overlap report             (default a temp file; path is emitted)
 #
 # Prints key=value lines (skip, source_sha, upstream_sha, rebased) to $GITHUB_OUTPUT when set, and to
 # stdout. Exit codes: 0 done or nothing to do, 1 rebase blocked or a hard failure.
@@ -27,6 +30,8 @@ PUSH_REMOTE="${PUSH_REMOTE:-origin}"
 STATE_BRANCH="${STATE_BRANCH:-fork-updates}"
 FORCE="${FORCE:-false}"
 ISSUE_TITLE="${ISSUE_TITLE:-Fork rebase blocked}"
+REVIEW_ISSUE_TITLE="${REVIEW_ISSUE_TITLE:-Fork sync: upstream overlap to review}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NO_ISSUE="${NO_ISSUE:-false}"
 
 emit() {
@@ -69,6 +74,39 @@ if [ "$FORCE" != "true" ] && [ "$last_upstream" = "$upstream_sha" ] && [ "$last_
   exit 0
 fi
 
+# Which upstream commits since the last sync touch what the patches touch. Computed BEFORE the rebase
+# (it needs the stack's current base) and reported whether or not the rebase applies: a clean rebase can
+# still mean upstream rewrote, or now duplicates, something a patch does. The fork side is what gets
+# reworked, so the owner is told each time.
+OVERLAP_REPORT="${OVERLAP_REPORT:-$(mktemp)}"
+old_base="$(git merge-base HEAD "upstream/$UPSTREAM_BRANCH")"
+python3 "$HERE/overlap.py" --old-base "$old_base" --upstream "$upstream_sha" --head "$old_head" \
+  --watch "$HERE/../overlap-watch.txt" > "$OVERLAP_REPORT" || { echo "warning: the overlap check failed; continuing without it" >&2; : > "$OVERLAP_REPORT"; }
+overlap=false
+if [ -s "$OVERLAP_REPORT" ]; then
+  overlap=true
+  echo "::warning title=Upstream overlap to review::$(head -1 "$OVERLAP_REPORT")"
+  cat "$OVERLAP_REPORT"
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then { echo "### Upstream overlap to review"; echo; echo '```'; cat "$OVERLAP_REPORT"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"; fi
+fi
+emit overlap "$overlap"; emit overlap_report "$OVERLAP_REPORT"
+
+# upsert_issue <title> <body>: open the ONE issue with this title, or update it if it is already open.
+find_issue() {
+  gh issue list --state open --search "\"$1\" in:title" --json number,title \
+    --jq "[.[] | select(.title == \"$1\")][0].number // empty" 2>/dev/null || true
+}
+upsert_issue() {
+  local existing; existing="$(find_issue "$1")"
+  if [ -n "$existing" ]; then
+    gh issue edit "$existing" --body "$2" >/dev/null && echo "updated issue #$existing"
+  else
+    gh issue create --title "$1" --body "$2" \
+      || echo "::warning::could not open the issue; the failed run is the only alert. Forks have Issues switched off by default: enable them under Settings, General, Features." >&2
+  fi
+}
+run_link="${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-local}"
+
 rebased=false
 rebase_log="$(mktemp)"
 if git merge-base --is-ancestor "upstream/$UPSTREAM_BRANCH" HEAD; then
@@ -98,17 +136,14 @@ else
         "" \
         "$(printf '%s\n' "$conflicted" | sed 's/^/- `/; s/$/`/')" \
         "" \
-        "Nothing was pushed and nothing was published. Rebase locally, resolve, and push the stack; the next run picks it up and closes this issue." \
+        "Nothing was pushed and nothing was published. Rework the fork's patch on top of upstream (never the other way round), push the stack, and the next run picks it up and closes this issue." \
         "" \
-        "Last updated by workflow run: ${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-local}")"
-      existing="$(gh issue list --state open --search "\"$ISSUE_TITLE\" in:title" --json number,title \
-        --jq "[.[] | select(.title == \"$ISSUE_TITLE\")][0].number // empty" 2>/dev/null || true)"
-      if [ -n "$existing" ]; then
-        gh issue edit "$existing" --body "$body" >/dev/null && echo "updated issue #$existing"
-      else
-        gh issue create --title "$ISSUE_TITLE" --body "$body" \
-          || echo "::warning::could not open the issue; the failed run is the only alert. Forks have Issues switched off by default: enable them under Settings, General, Features." >&2
-      fi
+        "Upstream changes that overlap the patches:" \
+        "" \
+        "$(if [ -s "$OVERLAP_REPORT" ]; then sed 's/^/    /' "$OVERLAP_REPORT"; else echo '    none found by file or function'; fi)" \
+        "" \
+        "Last updated by workflow run: $run_link")"
+      upsert_issue "$ISSUE_TITLE" "$body"
     fi
     emit skip true; emit source_sha "$old_head"; emit upstream_sha "$upstream_sha"; emit rebased false
     exit 1
@@ -124,12 +159,25 @@ if [ "$new_head" != "$old_head" ]; then
   git push --force-with-lease="refs/heads/$FORK_BRANCH:$old_head" "$PUSH_REMOTE" "HEAD:refs/heads/$FORK_BRANCH"
 fi
 
-# A rebase that works closes any earlier "blocked" issue.
+# A rebase that works closes any earlier "blocked" issue. Overlap with upstream is reported in its own
+# issue, opened or updated while there is something to review and closed when there is not.
 if [ "$NO_ISSUE" != "true" ]; then
-  existing="$(gh issue list --state open --search "\"$ISSUE_TITLE\" in:title" --json number,title \
-    --jq "[.[] | select(.title == \"$ISSUE_TITLE\")][0].number // empty" 2>/dev/null || true)"
+  existing="$(find_issue "$ISSUE_TITLE")"
   if [ -n "$existing" ]; then
     gh issue close "$existing" --comment "Rebased cleanly onto upstream \`$upstream_sha\`; stack head is now \`$new_head\`." >/dev/null || true
+  fi
+  if [ "$overlap" = true ]; then
+    upsert_issue "$REVIEW_ISSUE_TITLE" "$(printf '%s\n' \
+      "The stack rebased cleanly onto upstream \`$upstream_sha\`, but upstream changed code the fork's patches also touch. A clean rebase does not prove the patches still do the right thing: upstream may have superseded or now duplicates a fork feature. The fork's patch is reworked, never upstream's." \
+      "" \
+      "$(sed 's/^/    /' "$OVERLAP_REPORT")" \
+      "" \
+      "New stack head: \`$new_head\`. Last updated by workflow run: $run_link")"
+  else
+    existing="$(find_issue "$REVIEW_ISSUE_TITLE")"
+    if [ -n "$existing" ]; then
+      gh issue close "$existing" --comment "No upstream change since the last sync overlaps the patches." >/dev/null || true
+    fi
   fi
 fi
 

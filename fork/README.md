@@ -37,6 +37,7 @@ It can also be started by hand (Actions, Fork sync, Run workflow; inputs `force`
    `state.json`) it stops there, unless `force` is set. If the rebase conflicts it aborts, leaves
    `harness-fork` exactly as it was, opens or updates ONE issue titled "Fork rebase blocked" (listing the
    conflicting files and the upstream sha), fails the run, and stops. A later clean rebase closes the issue.
+   Whether or not the rebase applies, it also runs the overlap check (below).
 2. **plan**: work out the versions (below) and the release tag once, so every build stamps the same numbers.
    Toolchain pins (Flutter, Node, appimagetool) are read from upstream's own workflow files, so a bump
    upstream arrives with the next rebase.
@@ -80,6 +81,29 @@ latest is what lets fork installs keep updating. Consequences worth knowing:
 - Released assets are immutable. A re-run gets a new tag and new versions; the workflow refuses to reuse a
   tag.
 - Firmware versions must stay plain numbers (`fwPush.ts` only offers `^v?\d+\.\d+\.\d+$`).
+
+## The upstream overlap check
+
+Policy: if upstream adds something that supersedes or interferes with a fork feature, the fork's
+implementation is reworked, never upstream's. A rebase that applies cleanly does not tell you that, so on
+every sync `scripts/overlap.py` lists the upstream commits since the last sync that touch what the fork's
+patches touch, per patch, in three tiers:
+
+- `review: may supersede or interfere (same function)`: an upstream hunk and a hunk of a patch sit in the
+  same function of the same file (git's own hunk header names the function).
+- `review: touches the same file`: upstream changed a file a patch changed, elsewhere in it.
+- `review: watched areas changed upstream`: an upstream diff adds or removes a line matching a named
+  symbol in a named place, from `fork/overlap-watch.txt` (recap reader and recap tap against the character
+  tap in `ui_habitat.c`, PSRAM history, the LAN and WiFi transport, the black canvas `HT_THEME_CANVAS`,
+  the BOOT and PWR handling in `ptt.c`, the daemon's dial WiFi and recap code). Edit that file as the
+  features move; one `label :: path regex :: content regex` per line.
+
+The report is a warning annotation and a section of the run summary. When the rebase is blocked it is part
+of the "Fork rebase blocked" issue; when the rebase is clean it is the body of a second issue, "Fork sync:
+upstream overlap to review", opened or updated while there is something to review and closed when there
+is not. It is also appended to the release notes of the release that follows. It is a heuristic (file and
+function granularity, plus the watch list), so a quiet report is not proof that nothing changed; a
+noisy one costs a look.
 
 ## What the installed apps poll
 
@@ -243,7 +267,7 @@ Push to `fork-ops-dev`; it is a dry run. Useful locally:
 ```bash
 python3 fork/scripts/plan_versions.py --fork-base https://raw.githubusercontent.com/jaylfc/openharness/fork-updates/harness
 python3 -m unittest discover -s fork/tests                # version rule and manifest generator
-bash fork/tests/test_sync.sh                              # rebase, no-op, conflict and issue paths, on scratch repos
+bash fork/tests/test_sync.sh                              # rebase, no-op, overlap, conflict and issue paths, on scratch repos
 bash fork/tests/test_publish.sh                           # release then manifests, orphan branch, refusals, stub gh
 bash fork/scripts/run_cli_specs.sh                        # real CLI updater and firmware offer on a fixture channel
 FORK_DESKTOP_MANIFEST_URL=<url> bash fork/scripts/run_desktop_channel_test.sh   # real DesktopUpdater

@@ -15,9 +15,11 @@ mkdir "$W/bin"
 cat > "$W/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "gh $*" >> "$STUB_LOG"
-if [ "$1 $2" = "issue list" ] && [ -f "$STUB_OPEN" ]; then cat "$STUB_OPEN"; fi
-if [ "$1 $2" = "issue create" ]; then echo 7 > "$STUB_OPEN"; fi
-if [ "$1 $2" = "issue close" ]; then rm -f "$STUB_OPEN"; fi
+# two issue titles are in play: the blocked-rebase one and the overlap review one
+file="$STUB_OPEN"; [[ "$*" == *"overlap to review"* ]] && file="$STUB_OPEN.review"
+if [ "$1 $2" = "issue list" ] && [ -f "$file" ]; then cat "$file"; fi
+if [ "$1 $2" = "issue create" ]; then [[ "$*" == *"overlap to review"* ]] && echo 8 > "$STUB_OPEN.review" || echo 7 > "$STUB_OPEN"; fi
+if [ "$1 $2" = "issue close" ]; then [[ "$3" == 8 ]] && rm -f "$STUB_OPEN.review" || rm -f "$STUB_OPEN"; fi
 STUB
 chmod +x "$W/bin/gh"
 export PATH="$W/bin:$PATH" STUB_LOG="$W/gh.log" STUB_OPEN="$W/open_issue"; : > "$STUB_LOG"
@@ -28,14 +30,14 @@ ok() { echo "ok: $*"; }
 # upstream -> fork bare -> working clone on harness-fork with two patch commits
 git init -q --bare "$W/upstream.git"; git init -q --bare "$W/fork.git"
 git clone -q "$W/upstream.git" "$W/up" 2>/dev/null
-( cd "$W/up"; printf 'a\nb\nc\n' > file.txt; echo one > other.txt; git add .; git commit -qm base; git push -q origin HEAD:main )
+( cd "$W/up"; printf 'a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n' > file.txt; echo one > other.txt; git add .; git commit -qm base; git push -q origin HEAD:main )
 git clone -q "$W/fork.git" "$W/work" 2>/dev/null
 cd "$W/work"
 git fetch -q "$W/upstream.git" main; git checkout -q -b harness-fork FETCH_HEAD
 echo patch1 > fork-a.txt; git add .; git commit -qm "patch one"
 sed -i.bak 's/^b$/b-fork/' file.txt; rm file.txt.bak; git commit -qam "patch two edits line b"
 git push -q origin harness-fork
-export UPSTREAM_URL="$W/upstream.git" ISSUE_TITLE="[dry-run] Fork rebase blocked"
+export UPSTREAM_URL="$W/upstream.git" ISSUE_TITLE="[dry-run] Fork rebase blocked" REVIEW_ISSUE_TITLE="[dry-run] Fork sync: upstream overlap to review"
 run() { bash "$SYNC" 2>&1; }
 
 out="$(run)"; echo "$out" | grep -q '^skip=false' || fail "first run should build: $out"
@@ -62,6 +64,17 @@ out="$(run)"; echo "$out" | grep -q '^rebased=true' || fail "should rebase: $out
 git merge-base --is-ancestor "$(git -C "$W/up" rev-parse HEAD)" HEAD || fail "stack is not on upstream tip"
 ok "clean rebase pushed with a lease"
 
+grep -q 'issue create.*overlap to review' "$STUB_LOG" && fail "a change that touches none of the patches' files must not open a review issue"
+ok "no overlap, no review issue"
+
+# upstream edits ANOTHER part of a file a patch edits: rebases cleanly, but is flagged for review
+( cd "$W/up"; sed -i.bak 's/^i$/i-upstream/' file.txt; rm file.txt.bak; git commit -qam "upstream edits line i"; git push -q origin HEAD:main )
+: > "$STUB_LOG"; out="$(run)"; echo "$out" | grep -q '^rebased=true' || fail "still a clean rebase: $out"
+echo "$out" | grep -q 'review: touches the same file' || fail "overlap not reported: $out"
+echo "$out" | grep -q 'patch .* patch two edits line b' || fail "patch not named: $out"
+grep -q '^gh issue create --title \[dry-run\] Fork sync: upstream overlap to review' "$STUB_LOG" || fail "review issue not opened: $(cat "$STUB_LOG")"
+ok "clean rebase that overlaps is flagged for review and opens the one review issue"
+
 # upstream edits the SAME line our patch edits: the rebase must block, abort, and leave everything alone
 ( cd "$W/up"; sed -i.bak 's/^b$/b-upstream/' file.txt; rm file.txt.bak; git commit -qam "upstream edits line b"; git push -q origin HEAD:main )
 before_local="$(git rev-parse HEAD)"; before_remote="$(git -C "$W/fork.git" rev-parse harness-fork)"
@@ -86,4 +99,6 @@ git reset -q --hard HEAD~1; git push -q -f origin harness-fork
 : > "$STUB_LOG"; out="$(run)"; echo "$out" | grep -q '^skip=false' || fail "resolved stack should proceed: $out"
 grep -q '^gh issue close 7' "$STUB_LOG" || fail "issue not closed: $(cat "$STUB_LOG")"
 ok "resolved stack rebases and closes the issue"
+grep -q '^gh issue close 8' "$STUB_LOG" || fail "review issue should close once nothing overlaps: $(cat "$STUB_LOG")"
+ok "review issue closes when nothing overlaps"
 echo "all sync tests passed"

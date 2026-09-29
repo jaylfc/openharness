@@ -53,6 +53,7 @@ jobs:
       skip: ${{ steps.result.outputs.skip }}
       source_sha: ${{ steps.result.outputs.source_sha }}
       upstream_sha: ${{ steps.result.outputs.upstream_sha }}
+      overlap: ${{ steps.result.outputs.overlap }}
     steps:
       - id: mode
         env:
@@ -98,18 +99,29 @@ jobs:
           FORCE: ${{ inputs.force }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          OVERLAP_REPORT: ${{ runner.temp }}/overlap.md
         run: bash fork/scripts/sync.sh
 
-      # Dry runs never move harness-fork, but they can still rehearse the rebase: does the stack under
-      # test apply on today's upstream? Informational, in a scratch worktree.
-      - name: Rehearse the rebase (dry run)
+      # Dry runs never move harness-fork, but they can still rehearse the sync: does the stack under test
+      # apply on today's upstream, and which upstream changes touch what the stack touches? Informational,
+      # in a scratch worktree.
+      - name: Rehearse the rebase and the overlap check (dry run)
+        id: rehearse
         if: steps.mode.outputs.mode == 'dry'
         run: |
           set -uo pipefail
-          # Fetched by URL into a tracking ref, deliberately NOT added as a remote: `gh` picks a remote
-          # named upstream as the repository to act on, and this workflow must only ever write to this one.
           git fetch --quiet https://github.com/autonomous-ai/openharness.git +main:refs/remotes/upstream/main
           echo "upstream main: $(git rev-parse upstream/main)"
+          report="$RUNNER_TEMP/overlap.md"
+          python3 fork/scripts/overlap.py --old-base "$(git merge-base HEAD upstream/main)" --upstream upstream/main \
+            --head HEAD --watch fork/overlap-watch.txt > "$report" || : > "$report"
+          if [ -s "$report" ]; then
+            echo "overlap=true" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Upstream overlap to review::$(head -1 "$report")"
+            { echo "### Upstream overlap to review"; echo; echo '```'; cat "$report"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "overlap=false" >> "$GITHUB_OUTPUT"
+          fi
           git worktree add --detach "$RUNNER_TEMP/rehearsal" HEAD >/dev/null
           cd "$RUNNER_TEMP/rehearsal"
           if git rebase upstream/main >/dev/null 2>&1; then
@@ -119,21 +131,31 @@ jobs:
             git rebase --abort
           fi
 
+      - name: Keep the overlap report for the release notes
+        if: steps.rebase.outputs.overlap == 'true' || steps.rehearse.outputs.overlap == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: overlap-report
+          path: ${{ runner.temp }}/overlap.md
+          if-no-files-found: ignore
+
       - id: result
         env:
           MODE: ${{ steps.mode.outputs.mode }}
           REBASE_SKIP: ${{ steps.rebase.outputs.skip }}
           REBASE_SOURCE: ${{ steps.rebase.outputs.source_sha }}
           REBASE_UPSTREAM: ${{ steps.rebase.outputs.upstream_sha }}
+          REBASE_OVERLAP: ${{ steps.rebase.outputs.overlap }}
+          REHEARSE_OVERLAP: ${{ steps.rehearse.outputs.overlap }}
         run: |
           set -euo pipefail
           if [ "$MODE" = real ]; then
-            skip="$REBASE_SKIP"; source="$REBASE_SOURCE"; upstream="$REBASE_UPSTREAM"
+            skip="$REBASE_SKIP"; source="$REBASE_SOURCE"; upstream="$REBASE_UPSTREAM"; overlap="${REBASE_OVERLAP:-false}"
           else
-            skip=false; source="$GITHUB_SHA"
+            skip=false; source="$GITHUB_SHA"; overlap="${REHEARSE_OVERLAP:-false}"
             upstream="$(git ls-remote https://github.com/autonomous-ai/openharness.git refs/heads/main | cut -f1)"
           fi
-          { echo "skip=$skip"; echo "source_sha=$source"; echo "upstream_sha=$upstream"; } >> "$GITHUB_OUTPUT"
+          { echo "skip=$skip"; echo "source_sha=$source"; echo "upstream_sha=$upstream"; echo "overlap=$overlap"; } >> "$GITHUB_OUTPUT"
           if [ "$skip" = true ]; then echo "Nothing to release: upstream and the stack are unchanged since the last build." >> "$GITHUB_STEP_SUMMARY"; fi
 
   # 2. Work out versions and names once, so every build stamps the same numbers.
@@ -500,8 +522,14 @@ jobs:
           pattern: asset-*
           path: ${{ runner.temp }}/assets
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        if: needs.sync.outputs.overlap == 'true'
+        with:
+          name: overlap-report
+          path: ${{ runner.temp }}/overlap
       - name: Publish the release, then the manifests
         env:
+          OVERLAP_REPORT: ${{ needs.sync.outputs.overlap == 'true' && format('{0}/overlap/overlap.md', runner.temp) || '' }}
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.plan.outputs.tag }}
           CHANNEL_BRANCH: ${{ needs.plan.outputs.channel_branch }}

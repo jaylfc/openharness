@@ -16,6 +16,8 @@
 #   SOURCE_SHA      the commit that was built
 #   UPSTREAM_SHA    upstream/main it was rebased on (informational)
 #   PRERELEASE      'true' for dry runs (optional, default false)
+#   OVERLAP_REPORT  path of overlap.py's report for this sync (optional); when it has content it goes in the
+#                   release notes, so the release itself says what upstream changed under the patches
 #   GH_TOKEN, GITHUB_REPOSITORY   as in Actions
 set -euo pipefail
 
@@ -60,6 +62,12 @@ PY
     echo "Patch stack on top of upstream:"
     echo
     git log --format='- %h %s' "$UPSTREAM_SHA..$SOURCE_SHA"
+  fi
+  if [ -n "${OVERLAP_REPORT:-}" ] && [ -s "$OVERLAP_REPORT" ]; then
+    echo
+    echo "Upstream changes that overlap the patch stack (review; the fork side is reworked, never upstream's):"
+    echo
+    sed 's/^/    /' "$OVERLAP_REPORT"
   fi
 } > "$notes"
 

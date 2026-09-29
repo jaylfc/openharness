@@ -1,0 +1,12 @@
+# Areas of the fork's features that upstream is most likely to move under us. Read by
+# scripts/overlap.py on every sync. One per line: label :: path regex :: content regex.
+# An upstream commit that adds or removes a line matching the content regex in a file matching the path
+# regex is flagged for review even if no patch hunk overlaps it yet. Use `.` to flag any change to the path.
+recap reader and recap tap :: ui_habitat\.c :: recap|render_home|tap
+character tap versus recap tap :: ui_habitat\.c :: render_home|character.*tap|tap.*character
+PSRAM history :: main/.*history :: .
+black canvas :: ui/habitat/ :: HT_THEME_CANVAS|canvas
+BOOT and PWR buttons :: firmware/main/ptt\.c :: .
+LAN and WiFi transport on the dial :: firmware/main/(wifi|lan_|cable_link|cable_client|cable_frame) :: .
+dial WiFi in the daemon :: cli/src/cable/(dial|tcpLink|cableSession|cableFleet|dnsSd|serial) :: .
+recap in the daemon :: cli/src/(lib/(deviceRecap|summarize|normalize)|hookServer|cable/cableSession) :: recap|Recap

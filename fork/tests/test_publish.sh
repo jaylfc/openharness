@@ -16,10 +16,12 @@ case "$1 $2" in
   "release view")
     if [[ " $* " == *" --json "* ]]; then ( cd "$STUB_ASSETS" && for f in *; do echo "$f $(wc -c < "$f" | tr -d ' ')"; done ); exit 0; fi
     grep -qx "$3" "$STUB_RELEASES" 2>/dev/null && exit 0 || exit 1 ;;
-  "release create") echo "$3" >> "$STUB_RELEASES" ;;
+  "release create") echo "$3" >> "$STUB_RELEASES"
+    while [ $# -gt 0 ]; do [ "$1" = "--notes-file" ] && cp "$2" "$STUB_NOTES"; shift; done ;;
 esac
 STUB
 chmod +x "$W/bin/gh"
+export STUB_NOTES="$W/notes.md"
 export PATH="$W/bin:$PATH" STUB_LOG="$W/gh.log" STUB_RELEASES="$W/releases" STUB_ASSETS="$W/assets"; : > "$STUB_LOG"
 
 git init -q --bare "$W/remote.git"
@@ -38,7 +40,9 @@ git fetch -q origin fork-updates-dryrun; git show FETCH_HEAD:harness/cli/metadat
 [ "$(git rev-list --count FETCH_HEAD)" = 1 ] && [ -z "$(git rev-list --parents FETCH_HEAD | awk 'NF>1')" ] || fail "branch should be a single orphan commit"
 ok "first publish creates the orphan branch with one commit"
 
-out="$(run dryrun-2)" || fail "second publish: $out"
+printf 'Upstream changed 1 commit(s)\n- patch abc1234 recap tap\n' > "$W/overlap.md"
+out="$(OVERLAP_REPORT="$W/overlap.md" run dryrun-2)" || fail "second publish: $out"
+grep -q 'overlap the patch stack' "$STUB_NOTES" && grep -q 'recap tap' "$STUB_NOTES" || fail "release notes should carry the overlap report: $(cat "$STUB_NOTES")"
 git fetch -q origin fork-updates-dryrun
 [ "$(git rev-list --count FETCH_HEAD)" = 2 ] || fail "second publish should add a commit on top"
 git show FETCH_HEAD:harness/state.json | grep -q '"tag": "dryrun-2"' || fail "state.json not updated"
