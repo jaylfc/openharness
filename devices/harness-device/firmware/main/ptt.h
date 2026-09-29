@@ -1,6 +1,7 @@
-// Voice toggle on the physical BOOT button (GPIO0): press once to start recording, press again
-// to stop; auto-stops after 30s. (GPIO0 doubles as factory-reset, but ONLY when held at
-// power-on; during runtime it's the voice button.)
+// The physical keys (see ptt.c). BOOT (GPIO0) is back / stop the running turn / abort a recording on the
+// press edge, and a hold of about 0.8 s also toggles the screen; the PWR key (where there is a PMIC)
+// toggles the screen on a tap. Neither key starts or finishes a recording: voice is a touch gesture.
+// (GPIO0 doubles as factory-reset, but ONLY when held at power-on.)
 #pragma once
 
 // Start the button poll task. Call after ui_set_voice().
