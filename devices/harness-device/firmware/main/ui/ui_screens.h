@@ -465,6 +465,10 @@ void ui_stop_active_turn(void);
 // question is on screen, otherwise to ui_stop_active_turn(). Safe from a non-LVGL task.
 void ui_boot_pressed(void);
 
+// A double shake was recognised (shake_task.c). Opens the shake menu from HOME/AGENT when nothing else owns
+// the screen; otherwise does nothing. Safe from a non-LVGL task.
+void ui_shake(void);
+
 // --- Screen lock (3×3 pattern passcode) ---
 // Wire the sleep/wake power hook and lock now if a passcode is set (called once at the end of ui_init).
 void ui_lock_init_gate(void);

@@ -38,6 +38,8 @@ code = r'''
 #include "focus_faces.h"
 #include "pets.h"
 #include "history.h"
+#include "keyboard.h"
+#include "shake_menu.h"
 #include "workspace.h"
 #include "command_face.h"
 #include "arc_geometry.inc"
@@ -80,8 +82,9 @@ static struct {
     uint32_t memory_serial;
     struct { char id[192]; } models[2];
     char model_agent[64];
+    char stop_agent[ID_MAX];
     question_t q;
-    agent_t agents[MAX_PROJECTS]; hit_t hits[24];
+    agent_t agents[MAX_PROJECTS]; hit_t hits[40];
     ht_rect_t caption_arc;
     uint32_t reader_seq;
 } s;
@@ -155,6 +158,20 @@ static unsigned preview_brightness = 100;
 #define EXT_RAM_BSS_ATTR
 static unsigned changes;
 static void change(void) { changes++; }
+static EXT_RAM_BSS_ATTR ht_keyboard_t keyboard;
+static char keyboard_agent[ID_MAX];
+typedef struct { uint8_t brightness; bool muted; uint8_t character; bool quiet, straight_title, focus_face, scroll_reversed, round; int face; } ui_settings_t;
+enum { UI_SETTING_MUTED = 1u << 1, UI_SETTING_QUIET = 1u << 4 };
+static int applies; static uint32_t applied_fields; static ui_settings_t applied;
+static bool ui_settings_apply(const ui_settings_t *want, uint32_t fields, char *error, size_t cap) {
+    (void)error; (void)cap; applies++; applied_fields=fields; applied=*want;
+    if (fields & UI_SETTING_QUIET) s.quiet=want->quiet;
+    if (fields & UI_SETTING_MUTED) s.muted=want->muted;
+    return true;
+}
+static int turns; static char turn_agent[64], turn_text[HT_KB_MAX+1];
+static void cable_client_send_turn(const char *agent, const char *text) { turns++; COPY(turn_agent,agent); COPY(turn_text,text); }
+static int kb_sends; static action_t kb_queued;
 static void display_lock(void) {}
 static void display_unlock(void) {}
 static void display_wake(void) {}
@@ -196,6 +213,7 @@ static bool queue(action_t a) {
     if (a.kind==A_TAB_REFRESH) tab_queued=a;
     if (a.kind==A_NOTICE_READ) { notice_reads_sent++; notice_read_queued=a; }
     if (a.kind==A_DESKTOP) { desktop_opens++; COPY(opened_agent,a.id); }
+    if (a.kind==A_KB_SEND) { kb_sends++; kb_queued=a; }
     return true;
 }
 static bool scroll_emit(ht_scroll_phase_t phase, int dy, int velocity, void *ctx) {
@@ -215,6 +233,7 @@ for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notic
 code += function('render_settings') + function('ui_visit_state')
 code += function('ui_project_known') + function('ui_focus_project') + function('ui_apply_pending_focus')
 code += function('focus_centred') + function('focus_header') + function('focus_clipped') + function('render_focus_panes') + function('panes_move') + function('panes_settle') + function('render_agents') + function('tabs_move') + function('tab_name') + function('render_focus_tabs') + function('render_tabs') + function('page_controls') + function('render_notice') + function('render_focus_inbox') + function('render_list')
+code += function('menu_ctx') + function('render_shake_menu') + function('keyboard_key_text') + function('render_keyboard')
 for name in ['notice_remove', 'notice_sync_view', 'notice_selection', 'notice_restore_selection', 'notice_add', 'ui_notify_task_done', 'ui_notif_seen', 'ui_notif_read', 'ui_notif_replace', 'ui_notif_open', 'ui_question_close', 'ui_answer_receipt']:
     code += function(name)
 for name in ['event', 'ui_project_emit', 'ui_project_restore_event', 'ui_project_clear_event', 'ui_project_set_name', 'ui_project_remove', 'ui_project_clear_all', 'ui_project_apply_order']:
@@ -232,6 +251,11 @@ code+='static void visit_work(action_t a) { switch(a.kind) { case A_VISIT_SEND:'
 carry_actions = source.split('case A_CARRY:\n',1)[1].split('case A_NAP:',1)[0]
 code += 'static void carry_action(action_t a) { switch(a.kind) { case A_CARRY:\n' + carry_actions + 'default: break; } }\n'
 code += 'static void dispatch(action_t a);\n'
+static_stubs = 'static void display_bump_activity(void) {}\n'
+code += static_stubs + function('menu_toggle') + function('menu_run') + function('keyboard_key') + function('ui_shake')
+code += function('ui_boot_pressed') + function('power')
+kb_worker = source.split('        case A_KB_SEND: {',1)[1].split('        case A_QUESTION_READ:',1)[0]
+code += 'static void kb_work(action_t a) { switch(a.kind) { case A_KB_SEND: {' + kb_worker + 'default: break; } }\n'
 question_actions = source.split('    case A_QUESTION_CHOICES:\n',1)[1].split('    case A_INBOX:',1)[0]
 code += 'static void question_action(action_t a) { switch(a.kind) { case A_QUESTION_CHOICES:\n'+question_actions+'default: break; } }\n'
 draft_actions = source.split('    case A_DRAFT_EDIT:\n',1)[1].split('    case A_HOME:',1)[0]
@@ -268,6 +292,9 @@ static void dispatch(action_t a) {
     else if (a.kind == A_AGENTS) view(AGENTS);
     else if (a.kind == A_INBOX) notice_open();
     else if (a.kind == A_HOME) view(HOME);
+    else if (a.kind == A_MENU_OPEN) view(SHAKE_MENU);
+    else if (a.kind == A_MENU_ITEM) menu_run(a.value);
+    else if (a.kind == A_KEY) keyboard_key(a.value);
     else if (a.kind == A_NOTICE) notice_action(a);
     else if (a.kind == A_RECAP_DISMISS) dismiss_result(a.id);
     else if (a.kind == A_READER || a.kind == A_READER_OLDER || a.kind == A_READER_NEWER) reader_action(a);
@@ -295,6 +322,8 @@ static void scene_take(void) {
     else if (s.view == TABS || s.view == INBOX || s.view == MACHINES) render_list(&scene);
     else if (s.view == AGENTS) render_agents(&scene);
     else if (s.view == READER) render_reader(&scene);
+    else if (s.view == SHAKE_MENU) render_shake_menu(&scene);
+    else if (s.view == KEYBOARD) render_keyboard(&scene);
     else if (s.view == SELECTION) render_selection(&scene); else render_home(&scene);
     if (s.view == SETTINGS) { ht_scene_clear(&scene,BG); s.hit_count=0; render_settings(&scene); }
     if (present_scene) habitat_scene_presented(habitat_scene_receipt());
@@ -1454,6 +1483,131 @@ static void reader_checks(void) {
     reset();
     puts("reader: full text from PSRAM history, older/newer by swipe and control, position in the heading, stops at the last line, replays deduplicated, no-PSRAM fallback, glass never records PASS");
 }
+static const char *scene_text_at(int y) {
+    for (int i=0;i<scene.count;i++) if (scene.runs[i].y==y && scene.runs[i].font==&ht_mono_20) return scene.runs[i].text;
+    return "";
+}
+
+/* THE SHAKE MENU (fork): where a shake may open it, its rows, its keyboard, and the ways out. */
+static int key_by_label(const char *want) {
+    char l[8];
+    for (int i=0;i<HT_KB_KEYS;i++) { ht_kb_label(&keyboard,i,l); if(!strcmp(l,want)) return i; }
+    return -1;
+}
+static uint32_t shake_clock;
+static void tap_key(const char *label) {
+    int i=key_by_label(label); assert(i>=0);
+    ht_key_t k=ht_kb_key(i);
+    shake_clock+=400; tap(shake_clock,k.x+k.w/2,k.y+k.h/2);
+}
+static void tap_menu_row(int row) { shake_clock+=400; tap(shake_clock,233,108+row*52+26); }
+static void assert_plain_screen(void) {
+    // Nothing on these screens can start a recording, and everything drawn is on the glass.
+    assert(scene.count<=HT_RUNS);
+    for (int i=0;i<s.hit_count;i++) {
+        assert(s.hits[i].action!=A_PET && s.hits[i].action!=A_VOICE && s.hits[i].action!=A_READER &&
+               s.hits[i].action!=A_VOICE_STOP && s.hits[i].action!=A_VOICE_ABORT);
+        assert(rect_in_circle(s.hits[i].rect));
+    }
+    for (int i=0;i<scene.count;i++) if (scene.runs[i].text[0] && !scene.runs[i].arc) assert(rect_in_circle(run_box(&scene.runs[i])));
+}
+static void shake_menu_checks(void) {
+    // REACHABLE ONLY from the two main faces. Every other screen ignores a shake.
+    reset(); ui_shake(); assert(s.view==SHAKE_MENU);
+    reset(); s.view=AGENT; ui_shake(); assert(s.view==SHAKE_MENU);
+    for (int v=0; v<=(int)KEYBOARD; v++) {
+        if (v==(int)HOME || v==(int)AGENT) continue;
+        reset(); s.view=(view_t)v; ui_shake(); assert(s.view==v);
+    }
+    reset(); fake_asleep=true; ui_shake(); assert(s.view==HOME);           // a shake while asleep does nothing
+    reset(); recording=true; ui_shake(); assert(s.view==HOME);             // nor over a recording
+    reset(); s.voice_open=true; ui_shake(); assert(s.view==HOME);
+    reset(); s.touch_down=true; ui_shake(); assert(s.view==HOME);          // nor under a finger
+    reset(); s.view=VOICE; s.voice_open=true; recording=true; ui_shake(); assert(s.view==VOICE);
+
+    // THE MENU: five rows in the table's order, a back control, nothing that records, all on the glass.
+    reset(); ui_shake(); scene_take();
+    assert(ht_menu_count()==5);
+    assert(scene_has("Keyboard") && scene_has("History") && scene_has("Settings") &&
+           scene_has("Quiet mode: off") && scene_has("Mute sounds: off") && scene_has("[back]"));
+    int items=0; for (int i=0;i<s.hit_count;i++) items+=s.hits[i].action==A_MENU_ITEM;
+    assert(items==5 && action_enabled(A_HOME));
+    assert_plain_screen();
+    // Enable rules: no agent link, no keyboard; the reader and the rest do not need one
+    reset(); s.connected=false; ui_shake(); scene_take();
+    assert(!s.hits[0].enabled && s.hits[1].enabled && s.hits[2].enabled && s.hits[3].enabled && s.hits[4].enabled);
+    tap_menu_row(0); assert(s.view==SHAKE_MENU);                            // a disabled row does nothing
+    reset(); s.count=0; s.active=-1; ui_shake(); scene_take();
+    assert(!s.hits[0].enabled && !s.hits[1].enabled && s.hits[2].enabled);
+
+    // ROWS RUN THE EXISTING SCREENS. Settings and History are the reader and the controls list.
+    reset(); shake_clock=1000; ui_shake(); scene_take();
+    tap_menu_row(1); assert(s.view==READER); scene_take();
+    tap(shake_clock+=400,179+54,368+20); assert(s.view==HOME);              // the reader's [back]
+    ui_shake(); scene_take(); tap_menu_row(2); assert(s.view==SETTINGS); scene_take();
+    assert(action_enabled(A_INBOX) && action_enabled(A_MACHINES) && !starts);
+    tap(shake_clock+=400,110,80); assert(s.view==HOME);                     // that screen's "<" goes home, not back here
+
+    // TOGGLES go through the settings applier with every field restated, and the label follows.
+    reset(); shake_clock=1000; ui_shake(); scene_take();
+    s.brightness=70; s.focus_face=true; scroll_reversed=true;
+    tap_menu_row(3); scene_take();
+    assert(applies==1 && applied_fields==UI_SETTING_QUIET && applied.quiet && !applied.muted);
+    assert(applied.brightness==70 && applied.focus_face && applied.scroll_reversed && applied.round && applied.face==466);
+    assert(s.quiet && scene_has("Quiet mode: on") && s.view==SHAKE_MENU);
+    tap_menu_row(4); scene_take();
+    assert(applies==2 && applied_fields==UI_SETTING_MUTED && applied.muted && applied.quiet);   // quiet is not zeroed
+    assert(s.muted && scene_has("Mute sounds: on"));
+    tap_menu_row(3); scene_take(); assert(!s.quiet && applied.muted && scene_has("Quiet mode: off"));
+    scroll_reversed=false;
+
+    // BACK and BOOT both go to HOME from the menu and from the keyboard.
+    reset(); ui_shake(); scene_take(); tap(2000,233,392); assert(s.view==HOME);
+    reset(); ui_shake(); ui_boot_pressed(); assert(s.view==HOME);
+    reset(); ui_shake(); scene_take(); tap_menu_row(0); assert(s.view==KEYBOARD); ui_boot_pressed(); assert(s.view==HOME);
+    reset(); s.view=AGENT; s.agents[0].busy=true; ui_shake(); ui_boot_pressed(); assert(s.view==HOME);   // not the stop dialog
+    reset(); ui_shake(); s.view=SHAKE_MENU; recording=true; s.voice_open=true; ui_boot_pressed(); assert(!recording);
+    // A swipe across the menu is a way back, as on the other lists.
+    reset(); ui_shake(); scene_take(); habitat_touch(true,100,200,3000); habitat_touch(false,300,200,3100); assert(s.view==HOME);
+
+    // THE KEYBOARD: opens on the agent on screen, every key and control on the glass, nothing records.
+    reset(); shake_clock=1000; s.active=1; ui_shake(); scene_take(); tap_menu_row(0);
+    assert(s.view==KEYBOARD && !strcmp(keyboard_agent,"b") && keyboard.len==0); scene_take();
+    assert(s.hit_count==HT_KB_KEYS+1 && scene.count<=HT_RUNS && scene_has("to Agent B"));
+    assert_plain_screen();
+    for (int i=0;i<s.hit_count;i++) if (s.hits[i].action==A_KEY) assert(s.hits[i].value>=0 && s.hits[i].value<HT_KB_KEYS);
+    int send=key_by_label("send");
+    assert(!s.hits[1+send].enabled && !s.hits[1+key_by_label("del")].enabled);   // nothing to send or delete yet
+    tap_key("send"); assert(kb_sends==0 && s.view==KEYBOARD);
+    // typing, shift, the symbols page and delete, all by touch
+    tap_key("shift"); tap_key("H"); tap_key("i"); tap_key("123"); tap_key("!"); tap_key("abc"); tap_key("space");
+    scene_take();
+    assert(!strcmp(keyboard.text,"Hi! ") && scene_has("Hi! _"));
+    tap_key("del"); scene_take(); assert(!strcmp(keyboard.text,"Hi!") && scene_has("Hi!_"));
+    // the wire: send queues one action for the agent the keyboard opened on and goes home; the worker sends
+    // the trimmed text once and empties the buffer. The text never travels in the queued action.
+    congestion=true; tap_key("send"); assert(s.view==KEYBOARD && !strcmp(keyboard.text,"Hi!") && kb_sends==0); congestion=false;
+    s.connected=false; scene_take(); assert(!s.hits[1+send].enabled); tap_key("send"); assert(kb_sends==0); s.connected=true;
+    strcpy(s.agents[1].id,"gone"); scene_take(); assert(!s.hits[1+send].enabled); strcpy(s.agents[1].id,"b");
+    scene_take(); tap_key("send");
+    assert(kb_sends==1 && s.view==HOME && !strcmp(kb_queued.id,"b") && !kb_queued.text[0] && !turns);
+    kb_work(kb_queued); assert(turns==1 && !strcmp(turn_agent,"b") && !strcmp(turn_text,"Hi!") && keyboard.len==0);
+    kb_work(kb_queued); assert(turns==1);                                    // a second take finds nothing
+    // a drifting thumb does not throw the text away; the back key does, to the menu
+    reset(); shake_clock=1000; ui_shake(); scene_take(); tap_menu_row(0); scene_take(); tap_key("q");
+    habitat_touch(true,100,150,9000); habitat_touch(false,300,150,9100); assert(s.view==KEYBOARD && keyboard.len==1);
+    habitat_touch(true,233,150,9200); habitat_touch(false,233,420,9300); assert(s.view==KEYBOARD && keyboard.len==1);   // a vertical drag does not leave either
+    reset(); shake_clock=1000; ui_shake(); scene_take(); tap_menu_row(0); scene_take(); tap(9500,110,80); assert(s.view==SHAKE_MENU);
+    // a long message keeps its tail on screen and stays inside the run budget
+    reset(); shake_clock=1000; ui_shake(); scene_take(); tap_menu_row(0); scene_take();
+    for (int i=0;i<200;i++) tap_key(i%9==8 ? "space" : "a");
+    scene_take(); assert(scene.count<=HT_RUNS && keyboard.len==200);
+    assert(!strncmp(scene_text_at(HT_KB_TEXT_Y+2*HT_KB_TEXT_LINE)+strlen(scene_text_at(HT_KB_TEXT_Y+2*HT_KB_TEXT_LINE))-1,"_",1));
+    // going to sleep from either screen drops back to HOME and forgets the typing
+    reset(); ui_shake(); scene_take(); tap_menu_row(0); scene_take(); tap_key("q"); power(false); assert(s.view==HOME && keyboard.len==0);
+    reset(); ui_shake(); power(false); assert(s.view==HOME);
+    puts("shake menu: PASS (reachable from HOME/AGENT only, five rows and their rules, toggles through the settings applier, keyboard typing/send/refusals, BOOT and back, sleep forgets)");
+}
 int main(int argc, char **argv) {
     test_character = getenv("HABITAT_TEST_TUX") ? HT_CHARACTER_TUX : HT_CHARACTER_TIM;
     notification_read_checks(argc>1 ? argv[1] : NULL);
@@ -1496,6 +1650,7 @@ int main(int argc, char **argv) {
     recap_checks(dir);
     target_checks();
     reader_checks();
+    shake_menu_checks();
     notice_checks(dir);
     pane_memory_checks(dir);
     pane_notification_soak();
@@ -2807,7 +2962,7 @@ with tempfile.TemporaryDirectory(prefix='harness-touch-ui-') as d:
                     '-fsanitize='+os.environ.get('SANITIZERS','undefined,bounds'),
                     *extra_includes, '-I',str(native),str(out/'touch_ui.c'), *extra_sources, str(native/'gestures.c'),str(native/'history.c'),
                     str(native/'form.c'),str(native/'visit.c'),str(native/'draft.c'), str(native/'scroll.c'),str(native/'selection.c'),str(native/'carry.c'),str(native/'tim.c'),str(native/'character_motion.c'),str(native/'character_layout.c'),str(native/'character.c'),str(native/'illustrated.c'),str(native/'tux.c'),str(native/'focus.c'),str(native/'lvgl_fonts.c'),str(native/'lvgl_icons.c'),str(native/'focus_marks.c'),str(native/'focus_faces.c'),str(native/'pets.c'),str(native/'terminal.c'),
-                    str(native/'fonts.c'),str(native/'octopus.c'),str(native/'ascii_clip.c'),str(native/'octopus_font.c'),str(native/'workspace.c'),str(native/'command_face.c'),'-o',str(out/'touch_ui')],check=True)
+                    str(native/'fonts.c'),str(native/'octopus.c'),str(native/'ascii_clip.c'),str(native/'octopus_font.c'),str(native/'workspace.c'),str(native/'command_face.c'),str(native/'keyboard.c'),str(native/'shake_menu.c'),'-o',str(out/'touch_ui')],check=True)
     args=[str(out/'touch_ui')]
     if os.environ.get('HABITAT_PREVIEW_DIR'):
         dest=Path(os.environ['HABITAT_PREVIEW_DIR']);dest.mkdir(parents=True,exist_ok=True)

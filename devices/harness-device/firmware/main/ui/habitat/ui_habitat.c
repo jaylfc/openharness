@@ -14,6 +14,8 @@
 #include "perf_bench.h"
 #include "command_face.h"
 #include "history.h"
+#include "keyboard.h"
+#include "shake_menu.h"
 #include "theme.h"
 #include "focus_faces.h"
 #ifdef DEVICE_CREATURE_GALLERY
@@ -104,7 +106,9 @@ typedef enum {
     STOP,
     MODELS,
     MESSAGE,
-    OTA
+    OTA,
+    SHAKE_MENU,   // fork: opened by a double shake from HOME/AGENT (shake_menu.h)
+    KEYBOARD      // fork: type a message to the agent the menu was opened on (keyboard.h)
 } view_t;
 typedef enum {
     A_NONE,
@@ -143,7 +147,8 @@ typedef enum {
     A_SELECT_BEGIN, A_SELECT_FIND, A_SELECT_EXTEND, A_SELECT_SEND, A_RETURN, A_LATEST, A_VISIT_SEND,
     A_CARRY, A_CARRY_DROP, A_CARRY_SEND,
     A_DRAFT_EDIT, A_DRAFT_APPEND, A_DRAFT_UNDO, A_DRAFT_SEND, A_DRAFT_DISCARD,
-    A_DRAFT_STATE, A_DRAFT_OPTIONS, A_DRAFT_BACK, A_DRAFT_COMMAND, A_NOTICE_READ
+    A_DRAFT_STATE, A_DRAFT_OPTIONS, A_DRAFT_BACK, A_DRAFT_COMMAND, A_NOTICE_READ,
+    A_MENU_OPEN, A_MENU_ITEM, A_KEY, A_KB_SEND   // fork: the shake menu and its keyboard
 } action_kind_t;
 typedef struct {
     action_kind_t kind;
@@ -247,7 +252,9 @@ static EXT_RAM_BSS_ATTR struct {
     uint32_t voice_generation, voice_question_revision;
     int voice_question_index;
     uint32_t voice_wait_until;
-    hit_t hits[24];
+    // 40, not 24: the keyboard is one hit per key (31) plus its back control. The 24 in control() and the
+    // other list helpers is their own cap and stays; the keyboard fills its hits directly.
+    hit_t hits[40];
     ht_rect_t caption_arc;
     int hit_count, pressed;
     bool touch_down, touch_cancelled;
@@ -298,6 +305,10 @@ static void select_companion(void)
         .colour=identity->colour<0?255:(uint8_t)identity->colour,.mark=identity->mark};
 }
 static ht_history_t history;
+// The shake menu's keyboard: 500 bytes, in PSRAM with the rest of the model. `keyboard_agent` is the agent
+// the message is for, fixed when the keyboard opens so a carousel turn cannot redirect it.
+static EXT_RAM_BSS_ATTR ht_keyboard_t keyboard;
+static char keyboard_agent[ID_MAX];
 static ht_character_caption_t home_caption;
 static action_t pressed_action;
 /*
@@ -2105,6 +2116,75 @@ static void render_settings(ht_scene_t *f)
     }
 }
 /*
+ * THE SHAKE MENU AND ITS KEYBOARD (fork). What the rows are, and when each may be used, is shake_menu.c;
+ * where the keys are, and what typing does, is keyboard.c. This is only the drawing and the wiring.
+ */
+static void menu_ctx(ht_menu_ctx_t *c)
+{
+    c->connected = s.connected && !s.loading;
+    c->agent = active() != NULL;
+    c->quiet = s.quiet;
+    c->muted = s.muted;
+}
+static void render_shake_menu(ht_scene_t *f)
+{
+    ht_arc_title(f, DIM, "menu");
+    ht_menu_ctx_t c;
+    menu_ctx(&c);
+    int count = ht_menu_count(), rows = ht_menu_rows(count), paged = rows < count;
+    int first = paged ? s.offset : 0;
+    if (first < 0) first = 0;
+    if (first >= count) first = count - 1;
+    // A table that fits is five rows of 52; a longer one is three per page at the models list's pitch.
+    int top = paged ? 153 : HT_MENU_TOP, pitch = paged ? 72 : HT_MENU_PITCH;
+    for (int row = 0; row < rows && first + row < count; row++) {
+        int i = first + row, y = top + row * pitch, hit = s.hit_count++;
+        bool enabled = ht_menu_enabled(i, &c);
+        s.hits[hit] = (hit_t){{HT_MENU_X, y, HT_MENU_W, pitch}, A_MENU_ITEM, i, enabled};
+        char label[24];
+        ht_menu_label(i, &c, label);
+        ht_text(f, HT_MENU_TEXT_X, y + (pitch - UI_FONT->height) / 2, HT_MENU_TEXT_W, UI_FONT,
+                !enabled ? DIM : hit == s.pressed ? ACCENT : FG, hit == s.pressed ? SEL : BG, label);
+    }
+    if (paged) page_controls(f, count);
+    else control(f, 183, 390, 108, "[back]", A_HOME, 0, true);
+}
+static void keyboard_key_text(ht_scene_t *f, int i, uint16_t ink, uint16_t bg)
+{
+    ht_key_t k = ht_kb_key(i);
+    char label[8];
+    ht_kb_label(&keyboard, i, label);
+    // A letter is one big cell; a word is the small font, centred either way.
+    const ht_font_t *font = k.kind == HT_KEY_CHAR ? UI_FONT : &ht_mono_20;
+    int w = (int)strlen(label) * font->width;
+    ht_text(f, k.x + (k.w - w) / 2, k.y + (k.h - font->height) / 2, w, font, ink, bg, label);
+}
+static void render_keyboard(ht_scene_t *f)
+{
+    agent_t *target = find(keyboard_agent) >= 0 ? &s.agents[find(keyboard_agent)] : NULL;
+    bool can_send = s.connected && target;
+    // "to <name>" on the top arc, cut to what one arc holds; the typed words are never drawn there.
+    char to[24];
+    snprintf(to, sizeof to, "to %.12s", target ? target->name : "?");
+    ht_arc_title(f, DIM, to);
+    control(f, 87, 67, 48, "<", A_MENU_OPEN, 0, true);
+    // The last three lines of what is typed, with a cursor: the tail is what a person is looking for.
+    static EXT_RAM_BSS_ATTR char shown[HT_KB_MAX + 2];
+    ht_kb_display(&keyboard, shown, sizeof shown);
+    int lines = ht_text_rows(shown, &ht_mono_20, HT_KB_TEXT_W);
+    ht_wrap(f, HT_KB_TEXT_X, HT_KB_TEXT_Y, HT_KB_TEXT_W, HT_KB_TEXT_ROWS, lines > HT_KB_TEXT_ROWS ? lines - HT_KB_TEXT_ROWS : 0,
+            &ht_mono_20, FG, shown);
+    for (int i = 0; i < HT_KB_KEYS; i++) {
+        ht_key_t k = ht_kb_key(i);
+        bool enabled = ht_kb_key_enabled(&keyboard, i) && (k.kind != HT_KEY_SEND || can_send);
+        int hit = s.hit_count++;
+        s.hits[hit] = (hit_t){{k.x, k.y, k.w, k.h}, A_KEY, i, enabled};
+        bool pressed = hit == s.pressed;
+        uint16_t ink = !enabled ? DIM : pressed || (k.kind == HT_KEY_SHIFT && keyboard.shift) || k.kind == HT_KEY_SEND ? ACCENT : FG;
+        keyboard_key_text(f, i, ink, pressed ? SEL : BG);
+    }
+}
+/*
  * WHAT THE APP ASKED FOR, waiting for the worker to write it.
  *
  * NVS is flash and a commit takes milliseconds; the finger path has always queued its writes for
@@ -2173,6 +2253,12 @@ bool habitat_scene_take(ht_scene_t *f)
         break;
     case READER:
         render_reader(f);
+        break;
+    case SHAKE_MENU:
+        render_shake_menu(f);
+        break;
+    case KEYBOARD:
+        render_keyboard(f);
         break;
     case STOP:
         heading(f, "stop this turn?");
@@ -2395,6 +2481,68 @@ static void draft_move(int delta, uint32_t now)
             s.draft_drag = 0; change(); return;
         }
         change();
+    }
+}
+// A menu toggle goes through the same path the desktop app uses (ui_settings_apply), so the flash write,
+// the beep switch and the report back to the app are the existing ones. Every field is restated from the
+// live state: a pending save carries one value block, and a block with a zero in it would write a zero.
+static void menu_toggle(uint32_t field)
+{
+    ui_settings_t want;
+    memset(&want, 0, sizeof want);
+    want.brightness = (uint8_t)s.brightness;
+    want.muted = s.muted;
+    want.character = (uint8_t)character.id;
+    want.quiet = s.quiet;
+    want.straight_title = s.straight_title;
+    want.focus_face = s.focus_face;
+    want.scroll_reversed = scroll_reversed;
+    want.round = true;
+    want.face = HT_WIDTH;
+    if (field == UI_SETTING_QUIET) want.quiet = !s.quiet;
+    else want.muted = !s.muted;
+    char error[80];
+    if (!ui_settings_apply(&want, field, error, sizeof error)) {
+        COPY(s.title, "Settings");
+        snprintf(s.message, sizeof s.message, "%s", error[0] ? error : "Try again.");
+        view(MESSAGE);
+    }
+}
+static void menu_run(int i)
+{
+    ht_menu_ctx_t c;
+    menu_ctx(&c);
+    if (s.view != SHAKE_MENU || !ht_menu_enabled(i, &c)) return;
+    switch (ht_menu_item(i)->action) {
+    case HT_MENU_KEYBOARD:
+        ht_kb_reset(&keyboard);
+        COPY(keyboard_agent, active()->id);
+        view(KEYBOARD);
+        break;
+    case HT_MENU_HISTORY:
+        dispatch((action_t){.kind = A_READER});
+        break;
+    case HT_MENU_SETTINGS:
+        dispatch((action_t){.kind = A_SETTINGS});
+        break;
+    case HT_MENU_QUIET:
+        menu_toggle(UI_SETTING_QUIET);
+        break;
+    case HT_MENU_MUTE:
+        menu_toggle(UI_SETTING_MUTED);
+        break;
+    }
+}
+static void keyboard_key(int i)
+{
+    if (s.view != KEYBOARD) return;
+    ht_kb_result_t r = ht_kb_press(&keyboard, i);
+    if (r == HT_KB_CHANGED) change();
+    else if (r == HT_KB_SEND && s.connected && find(keyboard_agent) >= 0) {
+        // The text stays where it is until the worker takes it: a busy cable must not eat a message.
+        action_t send = {.kind = A_KB_SEND};
+        COPY(send.id, keyboard_agent);
+        if (queue(send)) view(HOME);
     }
 }
 static void dispatch(action_t a)
@@ -2749,6 +2897,15 @@ static void dispatch(action_t a)
     case A_SETTINGS:
         view(SETTINGS);
         break;
+    case A_MENU_OPEN:
+        view(SHAKE_MENU);
+        break;
+    case A_MENU_ITEM:
+        menu_run(a.value);
+        break;
+    case A_KEY:
+        keyboard_key(a.value);
+        break;
     case A_STOP:
         COPY(s.stop_agent, a.id);
         view(STOP);
@@ -2807,6 +2964,7 @@ static void dispatch(action_t a)
     case A_SELECT_SEND:
     case A_CARRY_SEND:
     case A_FORM_SEND:
+    case A_KB_SEND:   // the worker's alone, like the ones above
     case A_DRAFT_COMMAND:
     case A_VISIT_SEND:
     case A_SCROLL:
@@ -2947,6 +3105,17 @@ static void worker(void *unused)
             if (fields & UI_SETTING_MUTED && !audio_notify_set_muted(want.muted))
                 ui_cable_toast("Sound changed; saving failed.");
             ui_settings_changed();
+            break;
+        }
+        case A_KB_SEND: {
+            // The shake menu's keyboard: what was typed becomes one turn for the agent the keyboard opened
+            // on, over the same `turn.send` the daemon has always accepted. The text is copied out under
+            // the lock and never logged.
+            static EXT_RAM_BSS_ATTR char outbox[HT_KB_MAX + 1];
+            display_lock();
+            size_t n = ht_kb_take(&keyboard, outbox, sizeof outbox);
+            display_unlock();
+            if (n) cable_client_send_turn(a.id, outbox);
             break;
         }
         case A_QUESTION_READ:
@@ -3234,6 +3403,8 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 action_t a = {.kind = A_AGENT};
                 COPY(a.id, s.agents[i].id);
                 dispatch(a);
+            } else if (s.view == KEYBOARD) {
+                // A drifting thumb must not throw away what was typed; the back key is the way out.
             } else if (!surface)
                 view(HOME);
         }
@@ -3385,6 +3556,9 @@ static void power(bool on)
 {
     if (!on) {
         input_cancel();
+        // A shake while asleep does nothing, and a menu or half-typed message must not be waiting behind
+        // a dark screen: sleeping puts the dial back on its face and forgets the typing.
+        if (s.view == SHAKE_MENU || s.view == KEYBOARD) { ht_kb_reset(&keyboard); view(HOME); }
         if (!s.voice_open && selection.active) view(HOME);
         return;
     }
@@ -5031,6 +5205,23 @@ void ui_boot_pressed(void)
         view(STOP);
     } else
         view(HOME);
+    display_unlock();
+}
+// A double shake (shake_task.c). Opens the menu from the two main faces only, and only while nothing else
+// owns the glass: never over a recording, a question, the reader, a stop confirmation or a draft. Called
+// from the shake task, so it takes the display lock like the BOOT key does.
+void ui_shake(void)
+{
+    display_lock();
+    bool main = s.view == HOME || s.view == AGENT;
+    bool voice = s.voice_open || audio_client_active();
+    if (ht_menu_may_open(main, display_is_asleep(), voice, s.touch_down)) {
+        view(SHAKE_MENU);
+        if (s.view == SHAKE_MENU) {
+            ESP_LOGI("habitat", "shake: menu open");
+            display_bump_activity();   // a hand that just shook the dial has not yet looked at it
+        }
+    }
     display_unlock();
 }
 /*

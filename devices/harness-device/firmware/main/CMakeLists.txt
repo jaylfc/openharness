@@ -67,6 +67,8 @@ set(BOARD_SRCS
     "ui/habitat/tux.c"
     "ui/habitat/focus.c"
     "ui/habitat/history.c"
+    "ui/habitat/keyboard.c"
+    "ui/habitat/shake_menu.c"
     "ui/habitat/octopus.c"
     "ui/habitat/ascii_clip.c"
     "ui/habitat/octopus_font.c"
