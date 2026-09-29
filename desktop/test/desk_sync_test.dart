@@ -941,5 +941,48 @@ void main() {
         expect(api.batches, isEmpty);
       },
     );
+    test('relaunching with the desk joined again does not open the agent a second time', () async {
+      final storage = MemoryStore();
+      final store = PaneLayoutStore(storage: storage);
+      // Saved by a build that had not yet given the tab a desk id; the desk
+      // already holds the same agent's tabs from earlier launches.
+      await store.saveSwarms([
+        Swarm(id: 'store', name: Swarm.storeName, kind: 'store'),
+        Swarm(id: 'swarm-6', name: 'openharness', nameIsCustom: false)
+          ..titleMachineId = 'm'
+          ..titleAgentId = 'a0'
+          ..panes.add(TerminalPane(id: 1, machineId: 'm', agentId: 'a0')),
+      ], 'swarm-6');
+      final earlier = newDeskId(), again = newDeskId(), other = newDeskId();
+      final api = _DeskApi()
+        ..doc = DeskDoc(
+          revision: 3,
+          tabs: [
+            tab(earlier, name: 'openharness', agents: ['a0']),
+            tab(again, name: 'openharness', agents: ['a0']),
+            tab(other, name: 'elsewhere', agents: ['a1']),
+          ],
+        );
+      final app = createApp(store: storage)..api = api;
+      addTearDown(app.dispose);
+      await app.restorePaneLayoutForTest();
+      await app.deskStartForTest();
+      List<Swarm> ofAgent(String id) => [
+        for (final s in app.swarms)
+          if (s.panes.any((p) => p.agentId == id)) s,
+      ];
+      // One tab for the agent, the one that was selected, on the desk's id.
+      expect(ofAgent('a0'), hasLength(1));
+      expect(app.activeSwarm, same(ofAgent('a0').single));
+      expect(isDeskId(app.activeSwarmId), isTrue);
+      expect(ofAgent('a1'), hasLength(1));
+      expect(app.swarms.where((s) => s.isStore), hasLength(1));
+      // The desk holds one for it too, so no other window brings the copies back.
+      expect(
+        api.doc!.tabs.where((t) => t.panes.any((p) => p.agentId == 'a0')),
+        hasLength(1),
+      );
+      expect(app.deskSyncForTest.pending, isEmpty);
+    });
   });
 }

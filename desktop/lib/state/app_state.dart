@@ -11204,6 +11204,35 @@ class AppNotifier extends ChangeNotifier {
 
   /// Which tabs are the desk's business: harness tabs that are not drafts. The
   /// Store tab, orchestrator tabs and an untouched New Tab are this window's.
+  /// The agent a tab shows and nothing else: one agent pane, a title the
+  /// window derived (not one a person typed), nothing arranged. Two such tabs
+  /// of the same agent under the same title are copies of each other; null
+  /// for every tab that is anything more.
+  static String? _plainAgentKey(Swarm swarm) {
+    if (swarm.kind != 'harness' ||
+        swarm.nameIsCustom ||
+        swarm.isNewTabPage ||
+        swarm.panes.length != 1 ||
+        swarm.panes.single.agentId == null ||
+        swarm.presets.isNotEmpty ||
+        swarm.paneSizes.isNotEmpty) {
+      return null;
+    }
+    final pane = swarm.panes.single;
+    return '${pane.machineId}\u0000${pane.agentId}\u0000${swarm.name}';
+  }
+
+  /// [_plainAgentKey], for a tab as the desk holds it.
+  static String? _plainDeskAgentKey(DeskTab tab) {
+    if (tab.nameIsCustom ||
+        tab.panes.length != 1 ||
+        !(tab.layout?.isEmpty ?? true)) {
+      return null;
+    }
+    final pane = tab.panes.single;
+    return '${pane.machineId}\u0000${pane.agentId}\u0000${tab.name}';
+  }
+
   bool _deskTracks(Swarm swarm) =>
       swarm.kind == 'harness' && !isDraftSwarm(swarm.id);
 
@@ -11316,6 +11345,39 @@ class AppNotifier extends ChangeNotifier {
       return;
     }
     _desk.enabled = true;
+    // An agent this window already shows in a plain tab is not opened again by
+    // the desk's copies of it: the desk keeps what earlier launches seeded (a
+    // tab from before the desk gets a new desk id at every join), and applying
+    // it would add a tab for the same agent each time the app starts. The
+    // window's tab takes the desk's id for the agent, and the desk's other
+    // plain copies of it are closed.
+    final closeOnDesk = <Map<String, dynamic>>[];
+    final deskCopies = <String, List<DeskTab>>{};
+    for (final tab in doc.tabs) {
+      final key = _plainDeskAgentKey(tab);
+      if (key != null) deskCopies.putIfAbsent(key, () => []).add(tab);
+    }
+    for (final swarm in swarms.toList()) {
+      final key = _plainAgentKey(swarm);
+      final copies = key == null ? null : deskCopies[key];
+      if (copies == null || !_deskTracks(swarm)) continue;
+      final keep =
+          copies.where((tab) => tab.id == swarm.id).firstOrNull ??
+          copies.first;
+      if (keep.id != swarm.id) {
+        if (swarms.any((other) => other.id == keep.id)) continue;
+        final was = swarm.id;
+        swarm.id = keep.id;
+        if (_activeSwarmId == was) _activeSwarmId = swarm.id;
+        for (final entry in _draftSwarmReturns.entries.toList()) {
+          if (entry.value == was) _draftSwarmReturns[entry.key] = swarm.id;
+        }
+      }
+      for (final tab in copies) {
+        if (tab.id != keep.id) closeOnDesk.add({'op': 'tab.close', 'id': tab.id});
+      }
+      deskCopies.remove(key);
+    }
     // Tabs from before the desk carry per-window ids (`swarm-N`) two computers
     // would both mint. Give them desk ids once; the layout store keys by the
     // same string, so it follows on the next save.
@@ -11349,6 +11411,7 @@ class AppNotifier extends ChangeNotifier {
       });
     }
     _desk.pending.addAll(duringRead);
+    _desk.pending.addAll(closeOnDesk);
     appLog.info(
       'desk',
       'joined at rev ${doc.revision} · ${doc.tabs.length} on the desk · ${unknown.length} of ours to seed',
@@ -11913,16 +11976,7 @@ class AppNotifier extends ChangeNotifier {
         // close of its own, so only the first survives (the selected one when
         // it is among them). A tab someone named, split or filled keeps its
         // place.
-        String? soleAgent(Swarm swarm) =>
-            swarm.kind == 'harness' &&
-                !swarm.nameIsCustom &&
-                !swarm.isNewTabPage &&
-                swarm.panes.length == 1 &&
-                swarm.panes.single.agentId != null &&
-                swarm.presets.isEmpty &&
-                swarm.paneSizes.isEmpty
-            ? '${swarm.panes.single.machineId}\u0000${swarm.panes.single.agentId}'
-            : null;
+        final soleAgent = _plainAgentKey;
         final keptCopy = <String, Swarm>{};
         for (final swarm in restored) {
           final key = soleAgent(swarm);
