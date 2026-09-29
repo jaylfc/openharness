@@ -42,7 +42,10 @@ def main():
 
     deadline = time.time() + args.wait
     while True:
-        state = json.loads(get(f"{base}/state.json?t={int(time.time())}"))
+        try:
+            state = json.loads(get(f"{base}/state.json?t={int(time.time())}", retries=1))
+        except SystemExit:
+            state = {}
         if state.get("tag") == args.tag:
             break
         if time.time() > deadline:
@@ -51,9 +54,24 @@ def main():
         time.sleep(15)
     print(f"state.json: {json.dumps(state)}")
 
+    updated = set(state.get("entries_updated", []))
     checked = 0
     for rel in ("desktop", "cli", "esp32/ota"):
-        manifest = json.loads(get(f"{base}/{rel}/metadata.json?t={int(time.time())}"))
+        # raw.githubusercontent.com serves each file from its own cache, so right after a push one file
+        # can be new while another is still a 404 or the previous release. Retry until this manifest shows
+        # the entries THIS release wrote (they name the tag in their urls), within the same deadline.
+        while True:
+            try:
+                manifest = json.loads(get(f"{base}/{rel}/metadata.json?t={int(time.time())}", retries=1))
+                stale = [k for k, e in manifest.items() if k in updated and f"/download/{args.tag}/" not in json.dumps(e)]
+                if not stale:
+                    break
+                print(f"{rel}: still serving the previous release for {stale}")
+            except SystemExit:
+                print(f"{rel}: not served yet")
+            if time.time() > deadline:
+                die(f"{base}/{rel}/metadata.json never showed release {args.tag} within {args.wait}s")
+            time.sleep(15)
         for key, entry in manifest.items():
             files = {key: entry} if "url" in entry else {f"{key}.{k}": v for k, v in entry.items() if isinstance(v, dict)}
             for name, ref in files.items():
