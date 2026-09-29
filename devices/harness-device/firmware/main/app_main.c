@@ -33,6 +33,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "ptt.h"
+#include "shake_task.h"
 #include "ram_telemetry.h"
 #include "ui/display.h"
 #include "ui/touch.h"
@@ -209,6 +210,7 @@ void app_main(void)
     // Enable physical PTT after codec initialization. Otherwise holding the
     // button during boot can race the microphone's first allocation.
     ptt_start();
+    shake_start();   // fork: double shake opens a menu; probes the IMU on its own task
 
     // Agents have not arrived yet — don't flash the "No agents" empty tile. Park on the loading screen and
     // arm a landing so refresh_projects slides to agent 0 once the first list lands.

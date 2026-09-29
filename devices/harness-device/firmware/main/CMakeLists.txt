@@ -39,6 +39,10 @@ set(BOARD_SRCS
     "audio_probe.c"
     "voice_buffer.c"
     "ptt.c"
+    # shake to open a menu (fork): the IMU, the pure detector, the task
+    "shake_detect.c"
+    "shake_task.c"
+    "board/imu_qmi8658.c"
     # the board
     "board/board_i2c.c"
     "board/board.c"
