@@ -178,6 +178,11 @@ cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bou
    -o "$out/test_visit" "$here/test_visit.c" "$here/../main/ui/habitat/visit.c"
 "$out/test_visit"
 
+# The reader's history of each agent's results: a variable-length ring the board keeps in PSRAM.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -o "$out/test_history" "$here/test_history.c" "$here/../main/ui/habitat/history.c"
+"$out/test_history"
+
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
    -o "$out/test_form" "$here/test_form.c" "$here/../main/ui/habitat/form.c"
 "$out/test_form"
