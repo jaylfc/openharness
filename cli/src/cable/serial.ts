@@ -27,6 +27,14 @@ export interface DialPort {
   vendorId: number
   productId: number
   serialNumber?: string
+  /**
+   * Which ATTACHMENT of that device this is: macOS's per-enumeration `sessionID`, Linux's bus:devnum.
+   * It changes when the device is unplugged and plugged back in, and stays put while it sits there,
+   * INCLUDING across a reset or a reflash over USB-Serial/JTAG (measured: esptool's hard reset leaves
+   * the sessionID as it was). So it lets a verdict about a board ("not a dial") outlast a daemon restart
+   * and end at an unplug, but it cannot say the board was reflashed; the fleet watches for that.
+   */
+  session?: string
 }
 
 /**
@@ -52,6 +60,27 @@ export async function findDialPorts(): Promise<DialPort[]> {
   return []
 }
 
+/**
+ * Is another process holding this tty open right now?
+ *
+ * The daemon looks at every USB Espressif board on the desk, and most of them are not dials: they are
+ * somebody's work in progress, with esptool, `idf.py monitor` or a serial console on the other end. Two
+ * readers on one tty interleave bytes, and that corrupts a flash or a log, so a port somebody else has
+ * open is left alone and looked at again later. Cannot tell (no `lsof`, a timeout) reads as free: a
+ * daemon that never opens anything because a tool is missing would be worse than one that sometimes does.
+ */
+export async function portInUse(path: string): Promise<boolean> {
+  const pids = (out: unknown) => String(out ?? '').split('\n').map(l => Number(l.trim())).filter(n => n > 0 && n !== process.pid)
+  try {
+    const { stdout } = await runFile('lsof', ['-t', '--', path], { timeout: 5000 })
+    return pids(stdout).length > 0
+  } catch (error) {
+    // lsof exits 1 when nothing has the file open, but also when it lists holders and warns about
+    // something else (a stale network mount is enough), so what it printed counts either way.
+    return pids((error as { stdout?: unknown }).stdout).length > 0
+  }
+}
+
 /** Indentation column of an ioreg line — the tree's only structure. */
 function depthOf(line: string): number {
   const m = line.match(/^[\s|+-]*/)
@@ -75,6 +104,7 @@ export function parseDarwinDialPorts(dump: string): DialPort[] {
   const seen = new Set<string>()
   let armedAt: number | null = null
   let armedSerial: string | undefined
+  let armedSession: string | undefined
   let serialNumber: string | undefined
   let sawVendor = false
   let sawProduct = false
@@ -84,7 +114,7 @@ export function parseDarwinDialPorts(dump: string): DialPort[] {
     // A new node resets what we have seen about the current one. `+-o` opens a node in this dump.
     if (line.includes('+-o')) {
       const d = depthOf(line)
-      if (armedAt !== null && d <= armedAt) { armedAt = null; armedSerial = undefined }
+      if (armedAt !== null && d <= armedAt) { armedAt = null; armedSerial = undefined; armedSession = undefined }
       nodeDepth = d
       sawVendor = false
       sawProduct = false
@@ -98,12 +128,18 @@ export function parseDarwinDialPorts(dump: string): DialPort[] {
       serialNumber = line.split('=')[1]?.trim().replace(/^"|"$/g, '')
       if (armedAt === nodeDepth) armedSerial = serialNumber
     }
+    // The USB device node's own sessionID (the interfaces below it carry ones of their own).
+    if (line.includes('"sessionID"') && armedAt === nodeDepth) armedSession = line.split('=')[1]?.trim()
     if (sawVendor && sawProduct && armedAt === null) { armedAt = nodeDepth; armedSerial = serialNumber }
 
     if (armedAt !== null && line.includes('"IOCalloutDevice"')) {
       const path = line.split('=')[1]?.trim().replace(/^"|"$/g, '')
       if (path && !seen.has(path)) {
-        ports.push({ path, vendorId: DIAL_VENDOR_ID, productId: DIAL_PRODUCT_ID, ...(armedSerial ? { serialNumber: armedSerial } : {}) })
+        ports.push({
+          path, vendorId: DIAL_VENDOR_ID, productId: DIAL_PRODUCT_ID,
+          ...(armedSerial ? { serialNumber: armedSerial } : {}),
+          ...(armedSession ? { session: armedSession } : {}),
+        })
         seen.add(path)
       }
     }
@@ -127,7 +163,14 @@ function findLinux(): DialPort[] {
         if (vid === DIAL_VENDOR_ID && pid === DIAL_PRODUCT_ID) {
           let serialNumber: string | undefined
           try { serialNumber = readFileSync(`${dir}/serial`, 'utf8').trim() } catch { /* older USB descriptors */ }
-          ports.push({ path: `/dev/${name}`, vendorId: vid, productId: pid, ...(serialNumber ? { serialNumber } : {}) })
+          let session: string | undefined
+          try {
+            session = `${readFileSync(`${dir}/busnum`, 'utf8').trim()}:${readFileSync(`${dir}/devnum`, 'utf8').trim()}`
+          } catch { /* no attachment identity: verdicts on this port are short-lived */ }
+          ports.push({
+            path: `/dev/${name}`, vendorId: vid, productId: pid,
+            ...(serialNumber ? { serialNumber } : {}), ...(session ? { session } : {}),
+          })
         }
         break
       } catch {
