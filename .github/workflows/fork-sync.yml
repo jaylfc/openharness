@@ -97,6 +97,7 @@ jobs:
         env:
           FORCE: ${{ inputs.force }}
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: bash fork/scripts/sync.sh
 
       # Dry runs never move harness-fork, but they can still rehearse the rebase: does the stack under
@@ -105,8 +106,9 @@ jobs:
         if: steps.mode.outputs.mode == 'dry'
         run: |
           set -uo pipefail
-          git remote add upstream https://github.com/autonomous-ai/openharness.git
-          git fetch --quiet upstream main
+          # Fetched by URL into a tracking ref, deliberately NOT added as a remote: `gh` picks a remote
+          # named upstream as the repository to act on, and this workflow must only ever write to this one.
+          git fetch --quiet https://github.com/autonomous-ai/openharness.git +main:refs/remotes/upstream/main
           echo "upstream main: $(git rev-parse upstream/main)"
           git worktree add --detach "$RUNNER_TEMP/rehearsal" HEAD >/dev/null
           cd "$RUNNER_TEMP/rehearsal"
@@ -253,8 +255,9 @@ jobs:
         id: dart
         run: |
           set -euo pipefail
-          git remote add upstream https://github.com/autonomous-ai/openharness.git
-          git fetch --quiet upstream main
+          # Fetched by URL into a tracking ref, deliberately NOT added as a remote: `gh` picks a remote
+          # named upstream as the repository to act on, and this workflow must only ever write to this one.
+          git fetch --quiet https://github.com/autonomous-ai/openharness.git +main:refs/remotes/upstream/main
           base="$(git merge-base HEAD upstream/main)"
           files="$(git diff --name-only --diff-filter=AM "$base" HEAD -- 'desktop/*.dart' | sed 's#^desktop/##' | tr '\n' ' ')"
           echo "changed Dart files: ${files:-none}"
@@ -444,8 +447,9 @@ jobs:
         run: |
           git config user.name "$GITHUB_ACTOR"
           git config user.email "${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
-          git remote add upstream https://github.com/autonomous-ai/openharness.git
-          git fetch --quiet upstream main
+          # Fetched by URL into a tracking ref, deliberately NOT added as a remote: `gh` picks a remote
+          # named upstream as the repository to act on, and this workflow must only ever write to this one.
+          git fetch --quiet https://github.com/autonomous-ai/openharness.git +main:refs/remotes/upstream/main
       - uses: actions/download-artifact@v4
         with:
           pattern: asset-*

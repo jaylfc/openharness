@@ -23,6 +23,10 @@ set -euo pipefail
 UPSTREAM_SHA="${UPSTREAM_SHA:-}"
 PRERELEASE="${PRERELEASE:-false}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Every gh call below acts on THIS repository and nothing else. Without this gh infers the target from
+# the git remotes and prefers one named upstream, which is how a first attempt aimed at the upstream
+# project's releases (refused with a 403, luckily).
+export GH_REPO="$GITHUB_REPOSITORY"
 
 case "$CHANNEL_BRANCH" in
   fork-updates|fork-updates-dryrun) ;;

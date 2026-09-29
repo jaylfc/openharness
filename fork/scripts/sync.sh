@@ -41,9 +41,11 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
   exit 1
 fi
 
-git remote remove upstream 2>/dev/null || true
-git remote add upstream "$UPSTREAM_URL"
-git fetch --quiet upstream "$UPSTREAM_BRANCH"
+# Fetched by URL into a tracking ref, NOT added as a remote: `gh` treats a remote named upstream as the
+# repository to open issues on, and this script must only ever write to the fork.
+git fetch --quiet "$UPSTREAM_URL" "+$UPSTREAM_BRANCH:refs/remotes/upstream/$UPSTREAM_BRANCH"
+# Be explicit anyway. Inside Actions the repository is known; elsewhere the caller may set GH_REPO.
+if [ -z "${GH_REPO:-}" ] && [ -n "${GITHUB_REPOSITORY:-}" ]; then export GH_REPO="$GITHUB_REPOSITORY"; fi
 upstream_sha="$(git rev-parse "upstream/$UPSTREAM_BRANCH")"
 old_head="$(git rev-parse HEAD)"
 
