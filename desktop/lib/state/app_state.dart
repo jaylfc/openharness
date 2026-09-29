@@ -11907,6 +11907,41 @@ class AppNotifier extends ChangeNotifier {
                 swarm.isEmptyStarter && !swarm.isNewTabPage && swarm != starter,
           );
         }
+        // Older builds opened the same agent in a new tab every time it was
+        // asked for. Those copies — one pane, the agent's own name, nothing
+        // arranged — show exactly what the first one shows and each needs a
+        // close of its own, so only the first survives (the selected one when
+        // it is among them). A tab someone named, split or filled keeps its
+        // place.
+        String? soleAgent(Swarm swarm) =>
+            swarm.kind == 'harness' &&
+                !swarm.nameIsCustom &&
+                !swarm.isNewTabPage &&
+                swarm.panes.length == 1 &&
+                swarm.panes.single.agentId != null &&
+                swarm.presets.isEmpty &&
+                swarm.paneSizes.isEmpty
+            ? '${swarm.panes.single.machineId}\u0000${swarm.panes.single.agentId}'
+            : null;
+        final keptCopy = <String, Swarm>{};
+        for (final swarm in restored) {
+          final key = soleAgent(swarm);
+          if (key == null) continue;
+          final first = keptCopy[key];
+          if (first == null || swarm.id == saved['activeId']) {
+            keptCopy[key] = swarm;
+          }
+        }
+        final hadDuplicateAgentTabs = restored.any((swarm) {
+          final key = soleAgent(swarm);
+          return key != null && keptCopy[key] != swarm;
+        });
+        if (hadDuplicateAgentTabs) {
+          restored.removeWhere((swarm) {
+            final key = soleAgent(swarm);
+            return key != null && keptCopy[key] != swarm;
+          });
+        }
         swarms
           ..clear()
           ..addAll(restored);
@@ -11921,7 +11956,9 @@ class AppNotifier extends ChangeNotifier {
           _nextSwarmId++;
         }
         _autoPickedAgent = true;
-        if (hadDuplicateStarters || _activeSwarmId != restoredActive) {
+        if (hadDuplicateStarters ||
+            hadDuplicateAgentTabs ||
+            _activeSwarmId != restoredActive) {
           _persistLayout();
         }
         notifyListeners();

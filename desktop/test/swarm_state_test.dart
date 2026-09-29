@@ -129,6 +129,45 @@ void main() {
     );
   }
 
+  test('restore keeps one tab for an agent opened again and again, and every tab someone shaped', () async {
+    final storage = MemoryStore();
+    final store = PaneLayoutStore(storage: storage);
+    Swarm copy(String id, int paneId, {String agent = 'a0'}) =>
+        Swarm(id: id, name: 'Agent 0', nameIsCustom: false)
+          ..titleMachineId = 'm'
+          ..titleAgentId = agent
+          ..panes.add(TerminalPane(id: paneId, machineId: 'm', agentId: agent));
+    await store.saveSwarms([
+      Swarm(id: 'store', name: Swarm.storeName, kind: 'store'),
+      copy('swarm-2', 1),
+      copy('swarm-6', 2),
+      copy('0123456789abcdef0123456789abcdef', 3),
+      copy('other', 4, agent: 'a1'),
+      Swarm(id: 'named', name: 'Plan', nameIsCustom: true)
+        ..panes.add(TerminalPane(id: 5, machineId: 'm', agentId: 'a0')),
+    ], 'swarm-6');
+    final app = createApp(store: storage);
+    addTearDown(app.dispose);
+    await app.restorePaneLayoutForTest();
+    // The selected copy is the one that stays, in the first copy's place.
+    expect(app.swarms.map((swarm) => swarm.id), [
+      'store',
+      'swarm-6',
+      'other',
+      'named',
+    ]);
+    expect(app.activeSwarmId, 'swarm-6');
+    await app.flushPaneLayout();
+    final saved = await store.loadSwarms();
+    expect((saved!['swarms'] as List), hasLength(4));
+    // Every remaining tab still closes, the store and the last one included.
+    for (var i = 0; i < 4; i++) {
+      await app.closeSwarm(app.activeSwarmId);
+    }
+    expect(app.swarms, hasLength(1));
+    expect(app.allPanes, isEmpty);
+  });
+
   for (final legacy in [
     'New swarm',
     'New tab',
