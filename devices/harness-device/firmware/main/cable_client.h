@@ -28,6 +28,11 @@
 
 bool cable_client_supports(uint32_t features);
 
+// Start the optional LAN transport (WiFi station + mDNS + TCP listener). Call after cable_client_start()
+// and after the UI is up; it waits a few seconds on its own task before touching the radio. A dial with
+// no saved network never initialises the driver.
+void cable_client_lan_start(void);
+
 // ── the shapes the UI's tile list is built from ─────────────────────────────────────────────────────
 // These lived in http_api.h, which existed for the REST calls this firmware no longer makes. They are
 // the protocol's own vocabulary now, so they live with it.

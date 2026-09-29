@@ -4,9 +4,10 @@
 //
 //   BOOT ─▶ display ─▶ UI ─▶ USB cable link ─▶ the daemon's agent list ─▶ tileview
 //
-// There is ONE way in, and it is the cable. This firmware has no WiFi, no backend socket, no credential
-// and nothing to pair: plugging the dial into a computer running the harness daemon IS the authorization,
-// and everything the screen shows arrives over that wire.
+// There is ONE way in, and it is the cable. There is no backend socket, no account and nothing to pair:
+// plugging the dial into a computer running the harness daemon IS the authorization, and everything the
+// screen shows arrives over that wire. The one addition is an optional LAN transport for a computer the
+// cable has already bound (wifi_sta.c, wifi_cable.c): same frames, same daemon, started last.
 //
 // What that deleted, and why the boot is a dozen lines instead of a state machine: the SoftAP setup
 // portal, the saved-networks walk, the cool-standby retry loop, SNTP, the REST pairing calls, the E2EE
@@ -241,5 +242,9 @@ void app_main(void)
         esp_restart();
     }
     ram_telemetry_checkpoint("app_ready");
+
+    // The optional LAN transport, last: the display, the audio buffers and the cable already hold their
+    // memory. It starts itself a few seconds later on its own task, and stays dormant with no saved network.
+    cable_client_lan_start();
     vTaskDelete(NULL);
 }
