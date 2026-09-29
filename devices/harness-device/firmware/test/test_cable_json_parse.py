@@ -14,6 +14,10 @@ json_dir = Path(os.environ['IDF_PATH']) / 'components/json/cJSON'
 source = (main / 'cable_client.c').read_text()
 match = re.search(r'^static void on_frame\([^;]*?\)\n\{.*?^\}', source, re.M | re.S)
 assert match
+def function(name):
+    m = re.search(r'^static [^\n]*\b' + name + r'\([^;]*?\)\n\{.*?^\}', source, re.M | re.S)
+    assert m, name
+    return m.group(0) + '\n'
 code = r'''
 #include "cJSON.h"
 #include "cable_json_guard.h"
@@ -26,6 +30,17 @@ code = r'''
 #include <limits.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <stdatomic.h>
+#define portMAX_DELAY 0
+typedef enum { CABLE_XPORT_NONE = 0, CABLE_XPORT_USB, CABLE_XPORT_TCP } cable_xport_t;
+static inline void *cable_xport_ctx(cable_xport_t x) { return (void *)(uintptr_t)x; }
+static inline cable_xport_t cable_xport_of(void *ctx) { return (cable_xport_t)(uintptr_t)ctx; }
+static atomic_int s_xport;
+static uint32_t s_lan_ignored;
+static void *s_rx_lock = (void *)1;
+static int lock_depth;
+static void xSemaphoreTake(void *l, int w) { (void)l; (void)w; assert(lock_depth++ == 0); }
+static void xSemaphoreGive(void *l) { (void)l; assert(--lock_depth == 0); }
 static int64_t s_last_rx_us, clock_us = 123;
 static uint32_t s_bad,s_unknown;
 static unsigned handled, alloc_calls, live, fail_at, fw_slices;
@@ -46,17 +61,18 @@ static void deallocate(void *p) {
 }
 static int64_t esp_timer_get_time(void) { return clock_us; }
 static void fw_update_slice(const uint8_t *p,size_t n) { (void)p; (void)n; fw_slices++; }
-static void handle_message(const cJSON *root) {
-    assert(cJSON_IsObject(root)); handled++;
+static cable_xport_t last_via;
+static void handle_message(const cJSON *root, cable_xport_t via) {
+    assert(cJSON_IsObject(root)); handled++; last_via = via;
     const cJSON *v = cJSON_GetObjectItemCaseSensitive(root,"n");
     if (v) last_number = v->valueint;
 }
 '''
-code += match.group(0)
+code += function('from_session_wire') + function('counts_as_alive') + match.group(0)
 code += r'''
 static void send_text(const char *s,bool accepted) {
     unsigned before = handled;
-    on_frame(1,CABLE_TYPE_JSON,(const uint8_t *)s,strlen(s),NULL);
+    on_frame(1,CABLE_TYPE_JSON,(const uint8_t *)s,strlen(s),cable_xport_ctx(CABLE_XPORT_USB));
     assert(handled == before + accepted && live == 0 && allocated_bytes==0);
 }
 int main(void) {
@@ -74,7 +90,7 @@ int main(void) {
     send_text("{\"t\":\"bad\nstring\"}",false);
     const uint8_t nul[] = {'{','}',0,'x'};
     unsigned before = handled;
-    on_frame(1,CABLE_TYPE_JSON,nul,sizeof nul,NULL);
+    on_frame(1,CABLE_TYPE_JSON,nul,sizeof nul,cable_xport_ctx(CABLE_XPORT_USB));
     assert(handled == before && last == s_last_rx_us);
     // A rejected depth never enters cJSON or allocates.
     char deep[2048]; size_t n=0; deep[n++]='{'; deep[n++]='"'; deep[n++]='a'; deep[n++]='"';deep[n++]=':';
@@ -121,7 +137,7 @@ int main(void) {
     for(unsigned j=0;j<sizeof samples/sizeof *samples;j++) {
         for(size_t len=0;len<=strlen(samples[j]);len++) {
             uint8_t *p=map+2*page-len;memcpy(p,samples[j],len);
-            on_frame(1,CABLE_TYPE_JSON,p,len,NULL);assert(!live);
+            on_frame(1,CABLE_TYPE_JSON,p,len,cable_xport_ctx(CABLE_XPORT_USB));assert(!live);
         }
     }
     uint32_t seed=0x12347;static const char alphabet[]="{}[]\\\" :,01truefx\n\t";
@@ -130,11 +146,35 @@ int main(void) {
         uint8_t *p=map+2*page-len;
         for(size_t k=0;k<len;k++){seed=seed*1664525u+1013904223u;p[k]=alphabet[seed%(sizeof alphabet-1)];}
         if(len>1){p[0]='{';p[len-1]='}';}
-        on_frame(1,CABLE_TYPE_JSON,p,len,NULL);assert(!live);
+        on_frame(1,CABLE_TYPE_JSON,p,len,cable_xport_ctx(CABLE_XPORT_USB));assert(!live);
     }
     assert(!munmap(map,3*page));
-    on_frame(1,9,NULL,0,NULL);assert(s_unknown==1);
-    on_frame(1,CABLE_TYPE_FW,NULL,0,NULL);assert(fw_slices==1);
+    on_frame(1,9,NULL,0,cable_xport_ctx(CABLE_XPORT_USB));assert(s_unknown==1);
+    on_frame(1,CABLE_TYPE_FW,NULL,0,cable_xport_ctx(CABLE_XPORT_USB));assert(fw_slices==1);
+    // The LAN transport. Firmware slices are gated in on_frame itself; JSON is parsed either way and
+    // gated by from_session_wire() inside handle_message (welcome and wifi.* are decided there), so this
+    // checks the gate and that a peer nobody accepted cannot keep the silence timer fed.
+    const char *ping = "{\"t\":\"ping\"}";
+    const void *tcp = cable_xport_ctx(CABLE_XPORT_TCP), *usb = cable_xport_ctx(CABLE_XPORT_USB);
+    unsigned ignored = s_lan_ignored, slices = fw_slices;
+    assert(!from_session_wire(CABLE_XPORT_TCP) && from_session_wire(CABLE_XPORT_USB));   // no session
+    on_frame(1,CABLE_TYPE_FW,NULL,0,(void *)tcp);
+    assert(s_lan_ignored == ignored + 1 && fw_slices == slices);
+    int64_t before_rx = s_last_rx_us; clock_us += 5;
+    on_frame(1,CABLE_TYPE_JSON,(const uint8_t *)ping,strlen(ping),(void *)tcp);
+    assert(last_via == CABLE_XPORT_TCP && s_last_rx_us == before_rx);
+    atomic_store(&s_xport, CABLE_XPORT_TCP);
+    assert(from_session_wire(CABLE_XPORT_TCP) && !from_session_wire(CABLE_XPORT_USB));   // a LAN session
+    on_frame(1,CABLE_TYPE_JSON,(const uint8_t *)ping,strlen(ping),(void *)tcp);
+    assert(s_last_rx_us == clock_us);
+    before_rx = s_last_rx_us; clock_us += 5;
+    on_frame(1,CABLE_TYPE_JSON,(const uint8_t *)ping,strlen(ping),(void *)usb);
+    assert(last_via == CABLE_XPORT_USB && s_last_rx_us == before_rx);   // cable chatter cannot keep it alive
+    on_frame(1,CABLE_TYPE_FW,NULL,0,(void *)usb);
+    assert(fw_slices == slices);
+    atomic_store(&s_xport, CABLE_XPORT_USB);
+    assert(!from_session_wire(CABLE_XPORT_TCP) && from_session_wire(CABLE_XPORT_USB));   // a USB session
+    atomic_store(&s_xport, CABLE_XPORT_NONE);
     puts("USB JSON: real cJSON, guarded/truncated frames, 100000 mutations, every allocation failure PASS");
 }
 '''

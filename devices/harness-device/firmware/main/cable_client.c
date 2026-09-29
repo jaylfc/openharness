@@ -8,12 +8,16 @@
 #include "cJSON.h"
 #include "cable_link.h"
 #include "cable_json_guard.h"
+#include "config_store.h"
+#include "lan_bind.h"
+#include "lan_wifi_msg.h"
 #include "cable_machines.h"
 #include "device_mac.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "audio_capture.h"   // audio_notify_done() — the completion beep
 #include "audio_client.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "fw_update.h"
 #include "last_words.h"
@@ -22,6 +26,8 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "ui/ui_screens.h"
+#include "wifi_cable.h"
+#include "wifi_sta.h"
 
 static const char *TAG = "cable_client";
 
@@ -37,6 +43,7 @@ static const char *TAG = "cable_client";
 #define HELLO_ALONE_MS   2000    // no session: introduce myself often, the daemon cannot see me until I speak
 #define HELLO_SESSION_MS 15000   // session up: a keepalive, and a re-introduction if the daemon restarted
 #define SILENCE_MS       15000   // nothing of any kind for this long → the daemon is gone
+#define LAN_START_DELAY_MS 3000  // the radio comes up this long after the cable, never with it
 
 typedef struct {
     char id[ID_MAX];
@@ -62,10 +69,19 @@ static cable_machines_t  s_machines;
 static char              s_machine_id[MACHINE_ID_MAX];
 
 static atomic_bool       s_session;
+// ── the LAN transport's share of the session state ──────────────────────────────────────────────────
+// Which wire the session rides on (cable_xport_t; NONE when there is no session). Frames arrive from two
+// tasks now — the USB reader and the LAN task — so on_frame, session_tick and the LAN close callback
+// take s_rx_lock, and the single-owner comments below mean "owned by whoever holds it".
+static atomic_int        s_xport;
+static SemaphoreHandle_t s_rx_lock;
+static char              s_bind[LAN_BIND_LEN + 1];   // the token the last USB host gave us; "" if none
+static atomic_uint       s_wifi_sent_gen;            // wifi_sta_generation() as of the last wifi.status sent
+static uint32_t          s_lan_ignored;              // frames a LAN peer sent before it was accepted
 static atomic_uint       s_features;
 static bool              s_started; // boot owner; successful start is idempotent
-// Only the USB reader accesses this after start. A volatile 64-bit value is
-// not atomic on this 32-bit CPU; session expiry must share the reader's owner.
+// Guarded by s_rx_lock (the USB reader and the LAN task both deliver frames). A volatile 64-bit value is
+// not atomic on this 32-bit CPU; session expiry must share the writers' owner.
 static int64_t           s_last_rx_us;
 static char              s_machine_name[CABLE_NAME_MAX];
 static uint32_t          s_bad, s_unknown;
@@ -86,6 +102,18 @@ static bool send_json(cJSON *root)
     cJSON_Delete(root);
     if (!text) return false;
     const bool ok = cable_link_send(CABLE_TYPE_JSON, (const uint8_t *)text, strlen(text));
+    cJSON_free(text);
+    return ok;
+}
+
+// Same, to one named wire: a reply goes back the way its request came, whichever transport is active.
+static bool send_json_to(cable_xport_t x, cJSON *root)
+{
+    if (!root) return false;
+    char *text = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!text) return false;
+    const bool ok = cable_link_send_to(x, CABLE_TYPE_JSON, (const uint8_t *)text, strlen(text));
     cJSON_free(text);
     return ok;
 }
@@ -239,6 +267,29 @@ static void handle_settings_set(const cJSON *p)
     msg_settings(&root);   // always the values read back, never the ones asked for
     send_json(root);
 }
+// The WiFi state as a JSON object: the body of hello.wifi and, with a `t`, of every wifi.status.
+static cJSON *wifi_status_object(const lan_wifi_status_t *st)
+{
+    cJSON *o = cJSON_CreateObject();
+    if (o && !lan_wifi_status_fill(o, st)) { cJSON_Delete(o); o = NULL; }
+    return o;
+}
+
+// wifi.status, on `x`. `st` NULL reads the live state. Records the generation it reflects so the session
+// task does not send the same change again.
+static void send_wifi_status(cable_xport_t x, const lan_wifi_status_t *st)
+{
+    lan_wifi_status_t live;
+    const uint32_t gen = wifi_sta_generation();
+    if (!st) { wifi_sta_status(&live); st = &live; }
+    cJSON *root = msg("wifi.status");
+    if (!root) return;
+    // The fields sit beside `t`, as the contract says.
+    if (!lan_wifi_status_fill(root, st)) { cJSON_Delete(root); return; }
+    atomic_store(&s_wifi_sent_gen, gen);
+    send_json_to(x, root);
+}
+
 static void send_hello(void)
 {
     cJSON *root = msg("hello");
@@ -258,7 +309,24 @@ static void send_hello(void)
     // Carried on every greeting so the app's pane opens on what the device holds rather than on what
     // this computer last sent it — which after a reboot, a reset or a second window is not the same.
     msg_settings(&root);
-    send_json(root);
+    // The WiFi state, so the daemon has it on the first frame (optional; an older daemon ignores it).
+    lan_wifi_status_t wst;
+    wifi_sta_status(&wst);
+    cJSON *w = wifi_status_object(&wst);
+    if (w) msg_item(&root, "wifi", w);
+    if (!root) return;
+
+    // The greeting goes to BOTH wires. On the cable it is how a session starts. On the LAN it goes to a
+    // connected client even before that client is accepted, since the daemon on the other end is waiting
+    // for it. It must not follow the active transport: with a LAN session up, a keepalive greeting that
+    // also reaches USB is what lets a computer that has just been plugged in take the session over.
+    char *text = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!text) return;
+    cable_link_send_to(CABLE_XPORT_USB, CABLE_TYPE_JSON, (const uint8_t *)text, strlen(text));
+    if (wifi_cable_client())
+        cable_link_send_to(CABLE_XPORT_TCP, CABLE_TYPE_JSON, (const uint8_t *)text, strlen(text));
+    cJSON_free(text);
 }
 
 void cable_client_list_machines(void)
@@ -814,9 +882,12 @@ static void handle_swarms(const cJSON *p)
  * app's own shape and needs every one of them. */
 }
 
-static void session_up(const cJSON *p)
+static void session_up(const cJSON *p, cable_xport_t via)
 {
     atomic_store(&s_features, cable_features_parse(p));
+    s_last_rx_us = esp_timer_get_time();
+    atomic_store(&s_xport, (int)via);
+    cable_link_set_active(via);   // before the first send below: replies ride this wire
     const char *app = str_of(p, "app");
     const cJSON *machine = p ? cJSON_GetObjectItemCaseSensitive(p, "machine") : NULL;
     const char *name = str_of(machine, "name");
@@ -836,9 +907,11 @@ static void session_up(const cJSON *p)
     if (!was) {
         // Route the log through the link only once a peer is listening. Unplugged — or plugged into a
         // machine with no daemon — the port stays an ordinary console and `idf.py monitor` behaves as it
-        // always has. That is the only debugging instrument this single-port board has.
-        cable_link_set_log_framing(true);
-        ESP_LOGI(TAG, "session up: %s (%s, proto %d)", s_machine_name, app ? app : "daemon",
+        // always has. That is the only debugging instrument this single-port board has. Only the cable
+        // carries logs: a LAN session leaves the console alone.
+        if (via == CABLE_XPORT_USB) cable_link_set_log_framing(true);
+        ESP_LOGI(TAG, "session up via %s: %s (%s, proto %d)", via == CABLE_XPORT_TCP ? "tcp" : "usb",
+                 s_machine_name, app ? app : "daemon",
                  (cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(p, "proto"))
                            ? cJSON_GetObjectItemCaseSensitive(p, "proto")->valueint
                            : 0));
@@ -847,6 +920,8 @@ static void session_up(const cJSON *p)
         // dial would sit on an empty carousel opposite a daemon convinced it had already spoken.
         send_json(msg("machines.list"));
         send_json(msg("agents.list"));
+        // The WiFi state once, right behind the greeting, so the daemon does not have to wait for a change.
+        send_wifi_status(via, NULL);
         // Now that someone is listening: why this boot happened, and what was said before it if the
         // answer is a crash. Framed like every other line, so it lands in the same file.
         last_words_report();
@@ -856,8 +931,12 @@ static void session_up(const cJSON *p)
 static void session_down(const char *why)
 {
     if (!s_session) return;
+    const cable_xport_t was_via = (cable_xport_t)atomic_load(&s_xport);
     s_session = false;
     atomic_store(&s_features, 0);
+    atomic_store(&s_xport, (int)CABLE_XPORT_NONE);
+    cable_link_set_active(CABLE_XPORT_NONE);
+    if (was_via == CABLE_XPORT_TCP) wifi_cable_drop();   // a session that ends takes its socket with it
 
     // FORGET THE AGENTS. They belonged to a daemon that is no longer there, and a tile is not a memory —
     // it is a claim that something is running on the other end of this cable right now. Keeping the list
@@ -1035,14 +1114,91 @@ static void handle_notifications(const cJSON *p)
     ui_notif_replace(rows, n);
 }
 
-static void handle_message(const cJSON *root)
+// ── the LAN transport: who may talk, and the WiFi messages ──────────────────────────────────────────
+
+// Whether a frame from `via` may act on the session right now. USB is trusted as it always was. A LAN
+// peer is nobody until a `welcome` with the right bind has been accepted on its connection, and after a
+// LAN session starts the cable's stray traffic is ignored until its own `welcome` takes the session over.
+static bool from_session_wire(cable_xport_t via)
+{
+    const cable_xport_t cur = (cable_xport_t)atomic_load(&s_xport);
+    if (via == CABLE_XPORT_TCP) return cur == CABLE_XPORT_TCP;
+    return cur != CABLE_XPORT_TCP;
+}
+
+static void handle_welcome(const cJSON *p, cable_xport_t via)
+{
+    const char *bind = str_of(p, "bind");
+    const cable_xport_t cur = (cable_xport_t)atomic_load(&s_xport);
+    if (via == CABLE_XPORT_TCP) {
+        // USB wins, and a stranger never does. Both end the same way: the connection is closed.
+        if (cur == CABLE_XPORT_USB) {
+            ESP_LOGI(TAG, "tcp welcome ignored: a usb session is up");
+            wifi_cable_drop();
+            return;
+        }
+        if (!lan_bind_equal(s_bind, bind)) {
+            ESP_LOGW(TAG, "tcp welcome rejected");   // wrong or missing bind, or none stored; never the token
+            wifi_cable_drop();
+            return;
+        }
+    } else {
+        // The cable is the authorization: whoever is plugged in now is who WiFi is bound to.
+        if (bind) {
+            if (!lan_bind_valid(bind)) ESP_LOGD(TAG, "welcome.bind malformed, ignored");
+            else if (strcmp(bind, s_bind) != 0 && config_save_bind(bind)) {
+                snprintf(s_bind, sizeof(s_bind), "%s", bind);
+                ESP_LOGI(TAG, "wifi bound to this computer");
+            }
+        }
+        if (cur == CABLE_XPORT_TCP) {   // the cable takes the session from the LAN
+            session_down("usb takes over");
+            wifi_cable_drop();
+        }
+    }
+    session_up(p, via);
+}
+
+// USB only, in every state: the cable is what authorizes a network, so a `wifi.set` never trusts a
+// LAN peer, however well it has welcomed.
+static void handle_wifi_set(const cJSON *p, cable_xport_t via)
+{
+    if (via != CABLE_XPORT_USB) { ESP_LOGW(TAG, "wifi.set ignored: only the cable may set a network"); return; }
+    char ssid[LAN_SSID_MAX + 1], psk[LAN_PSK_MAX + 1];
+    const lan_wifi_set_result_t r = lan_wifi_parse_set(p, ssid, psk);
+    if (r != LAN_WIFI_SET_OK) {
+        ESP_LOGW(TAG, "wifi.set rejected (bad %s)", r == LAN_WIFI_SET_BAD_PSK ? "psk" : "ssid");
+        lan_wifi_status_t st = { .state = LAN_WIFI_FAILED };
+        snprintf(st.reason, sizeof(st.reason), "invalid");
+        send_wifi_status(via, &st);
+        return;
+    }
+    const char *kind = psk[0] ? "secured" : "open";   // the only thing about the psk that is ever logged
+    ESP_LOGI(TAG, "wifi.set: joining a saved %s network", kind);
+    wifi_sta_set(ssid, psk);
+    memset(psk, 0, sizeof(psk));
+    send_wifi_status(via, NULL);
+}
+
+static void handle_wifi_forget(cable_xport_t via)
+{
+    if (via != CABLE_XPORT_USB) { ESP_LOGW(TAG, "wifi.forget ignored: only the cable may forget a network"); return; }
+    wifi_sta_forget();
+    send_wifi_status(via, NULL);
+}
+
+static void handle_message(const cJSON *root, cable_xport_t via)
 {
     const char *t = str_of(root, "t");
     if (!t) { s_bad++; return; }
     const cJSON *p = cJSON_GetObjectItemCaseSensitive(root, "p");
     if (!p) p = root;   // flat messages are legal; `p` is a convenience, not a requirement
 
-    if (strcmp(t, "welcome") == 0) { session_up(p); return; }
+    if (strcmp(t, "welcome") == 0) { handle_welcome(p, via); return; }
+    if (strcmp(t, "wifi.set") == 0) { handle_wifi_set(p, via); return; }
+    if (strcmp(t, "wifi.forget") == 0) { handle_wifi_forget(via); return; }
+    // Everything below acts on the session, so it only counts from the wire the session is on.
+    if (!from_session_wire(via)) { if (via == CABLE_XPORT_TCP) s_lan_ignored++; return; }
     if (strcmp(t, "ping") == 0) { send_json(msg("pong")); return; }
     if (strcmp(t, "agents.begin") == 0) { handle_agents_begin(); return; }
     if (strcmp(t, "agent") == 0) { handle_agent(p); return; }
@@ -1250,27 +1406,39 @@ static void handle_message(const cJSON *root)
     ESP_LOGD(TAG, "unhandled message '%s'", t);
 }
 
+// Whether traffic on `via` is the session's own, for the silence timer: the session's wire, or the cable
+// while there is no session at all.
+static bool counts_as_alive(cable_xport_t via)
+{
+    const cable_xport_t cur = (cable_xport_t)atomic_load(&s_xport);
+    return cur == CABLE_XPORT_NONE ? via == CABLE_XPORT_USB : via == cur;
+}
+
 static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size_t payload_len, void *ctx)
 {
     (void)version;
-    (void)ctx;
+    const cable_xport_t via = cable_xport_of(ctx);
+    // Two tasks deliver frames now (the USB reader and the LAN task). Everything below, and the session
+    // state it touches, was written for one; this lock keeps it one.
+    xSemaphoreTake(s_rx_lock, portMAX_DELAY);
     if (type == CABLE_TYPE_FW) {
+        if (!from_session_wire(via)) { if (via == CABLE_XPORT_TCP) s_lan_ignored++; goto out; }
         s_last_rx_us = esp_timer_get_time();
         // Straight to flash, on this task. That is deliberate and it is what the credit window is sized
         // against: the write blocks the reader for ~16 ms per slice, and nothing drains the port
         // meanwhile — see docs/specs/cable-protocol.md §7.
         fw_update_slice(payload, payload_len);
-        return;
+        goto out;
     }
     if (type != CABLE_TYPE_JSON) {
         // PCM travels the other way; anything else is a peer that knows a payload kind this build does not.
         s_unknown++;
-        return;
+        goto out;
     }
 
     // Parse directly from the bounded frame. cJSON owns its decoded strings;
     // none of the tree retains this buffer after the callback returns.
-    if (!cable_json_guard(payload, payload_len)) { s_bad++; return; }
+    if (!cable_json_guard(payload, payload_len)) { s_bad++; goto out; }
     const char *end = NULL;
     cJSON *root = cJSON_ParseWithLengthOpts((const char *)payload, payload_len, &end, false);
     if (root) {
@@ -1278,10 +1446,20 @@ static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size
         while (end < limit && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) end++;
         if (end != limit || !cJSON_IsObject(root)) { cJSON_Delete(root); root = NULL; }
     }
-    if (!root) { s_bad++; return; }
-    s_last_rx_us = esp_timer_get_time();
-    handle_message(root);
+    if (!root) { s_bad++; goto out; }
+    if (counts_as_alive(via)) s_last_rx_us = esp_timer_get_time();
+    handle_message(root, via);
     cJSON_Delete(root);
+out:
+    xSemaphoreGive(s_rx_lock);
+}
+
+// The LAN client is gone, however it went. If a session rode on it, that session is over.
+static void lan_closed(void)
+{
+    xSemaphoreTake(s_rx_lock, portMAX_DELAY);
+    if (s_session && atomic_load(&s_xport) == CABLE_XPORT_TCP) session_down("tcp closed");
+    xSemaphoreGive(s_rx_lock);
 }
 
 // ── session task ────────────────────────────────────────────────────────────────────────────────────
@@ -1289,10 +1467,13 @@ static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size
 static void session_tick(void *ctx)
 {
     (void)ctx;
+    xSemaphoreTake(s_rx_lock, portMAX_DELAY);
     fw_update_tick();
+    // Runs on the USB reader but judges either wire: the LAN task delivers frames, it does not keep time.
     if (s_session && esp_timer_get_time() - s_last_rx_us > (int64_t)SILENCE_MS * 1000) {
         session_down("silence");
     }
+    xSemaphoreGive(s_rx_lock);
 }
 
 static void session_task(void *arg)
@@ -1310,6 +1491,11 @@ static void session_task(void *arg)
             next_hello_us = now + (int64_t)(s_session ? HELLO_SESSION_MS : HELLO_ALONE_MS) * 1000;
         }
 
+        // A WiFi state change, said on the session's wire. Polled here (not called back from the radio's
+        // event task) so a slow or stalled write never lands on a task the WiFi stack depends on.
+        if (s_session && wifi_sta_generation() != atomic_load(&s_wifi_sent_gen))
+            send_wifi_status((cable_xport_t)atomic_load(&s_xport), NULL);
+
         vTaskDelay(pdMS_TO_TICKS(250));
     }
 }
@@ -1322,11 +1508,18 @@ bool cable_client_start(void)
     s_agents = calloc(CABLE_MAX_AGENTS, sizeof(cable_agent_t));
     s_agents_lock = xSemaphoreCreateMutex();
     s_models_sem = xSemaphoreCreateBinary();
-    if (!s_agents || !s_agents_lock || !s_models_sem) {
+    s_rx_lock = xSemaphoreCreateMutex();
+    config_load_bind(s_bind, sizeof(s_bind));
+    if (!lan_bind_valid(s_bind)) s_bind[0] = '\0';   // whatever is in flash is only trusted if it is a token
+    if (!s_agents || !s_agents_lock || !s_models_sem || !s_rx_lock) {
         ESP_LOGE(TAG, "no memory for the agent list — link disabled");
         goto failed;
     }
     s_last_rx_us = esp_timer_get_time();
+    // The LAN transport's hooks, before the link can deliver a frame (a `wifi.set` may be the first).
+    // Nothing here touches the radio; that waits for cable_client_lan_start().
+    wifi_cable_init(on_frame, lan_closed);
+    wifi_sta_prepare();
     ui_set_connected(false);
     if (xTaskCreate(session_task, "cable_session", 4096, NULL, 4, &hello_task) != pdPASS) {
         ESP_LOGE(TAG, "session task create failed — no handshake");
@@ -1344,8 +1537,35 @@ failed:
     free(s_agents); s_agents = NULL;
     if (s_agents_lock) vSemaphoreDelete(s_agents_lock);
     if (s_models_sem) vSemaphoreDelete(s_models_sem);
-    s_agents_lock = s_models_sem = NULL;
+    if (s_rx_lock) vSemaphoreDelete(s_rx_lock);
+    s_agents_lock = s_models_sem = s_rx_lock = NULL;
     return false;
+}
+
+// The optional LAN transport, started once the cable is up. Deliberately late and deliberately its own
+// task: bringing the radio up takes tens of KB of internal RAM in one go, and the display, the audio
+// buffers and the refresh task must already have theirs. With no saved network this does nothing else.
+static void lan_boot_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(LAN_START_DELAY_MS));
+    ESP_LOGI(TAG, "lan start: free_int=%u largest_int=%u free_psram=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    wifi_sta_init();
+    ESP_LOGI(TAG, "lan started: free_int=%u largest_int=%u free_psram=%u",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    vTaskDelete(NULL);
+}
+
+void cable_client_lan_start(void)
+{
+    if (!s_started) return;   // no cable link, no LAN: the LAN only ever carries what the cable authorized
+    if (xTaskCreate(lan_boot_task, "lan_boot", 6144, NULL, 3, NULL) != pdPASS)
+        ESP_LOGW(TAG, "lan boot task create failed — no LAN transport");
 }
 
 bool cable_client_is_connected(void) { return s_session; }

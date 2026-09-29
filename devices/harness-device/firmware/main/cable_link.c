@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "last_words.h"
+#include "wifi_cable.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -89,6 +90,8 @@ static cable_frame_cb  s_cb;
 static cable_tick_cb   s_tick;
 static void           *s_ctx;
 static atomic_bool     s_running;
+// Which transport carries a session right now (cable_xport_t). Written by the session layer.
+static atomic_int      s_active = CABLE_XPORT_NONE;
 
 // Serialises the shared encode buffer AND the write, so two tasks sending at once cannot interleave
 // halves of two frames onto the wire. A frame split down the middle by a second sender is not something
@@ -111,10 +114,11 @@ static _Atomic(vprintf_like_t) s_prev_vprintf = vprintf;
 static atomic_bool s_log_framing;
 static atomic_uint s_dropped_logs;
 
-static bool send_locked(uint8_t type, const uint8_t *payload, size_t payload_len, TickType_t wait)
+static bool send_locked(cable_xport_t x, uint8_t type, const uint8_t *payload, size_t payload_len, TickType_t wait)
 {
     int len = cable_frame_encode(type, payload, payload_len, s_tx_frame, sizeof(s_tx_frame));
     if (len < 0) return false;
+    if (x == CABLE_XPORT_TCP) return wifi_cable_write(s_tx_frame, (size_t)len);
     return usb_serial_jtag_write_bytes(s_tx_frame, (size_t)len, wait) == len;
 }
 
@@ -140,7 +144,7 @@ static int log_vprintf(const char *fmt, va_list args)
         while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) len--;
         // Into the RTC ring first — that copy survives the reboot the next line may be the last before.
         if (len > 0) last_words_add(line, len);
-        if (len > 0 && !send_locked(CABLE_TYPE_LOG, (const uint8_t *)line, len, pdMS_TO_TICKS(LOG_WRITE_WAIT_MS)))
+        if (len > 0 && !send_locked(CABLE_XPORT_USB, CABLE_TYPE_LOG, (const uint8_t *)line, len, pdMS_TO_TICKS(LOG_WRITE_WAIT_MS)))
             atomic_fetch_add_explicit(&s_dropped_logs, 1, memory_order_relaxed);
     }
     xSemaphoreGive(s_tx_lock);
@@ -181,7 +185,7 @@ static void reader_task(void *arg)
         // Never fails and never rejects: everything arriving here is untrusted, starts mid-stream after
         // every boot, and the only useful response to a byte that makes no sense is to step over it.
         if (n > 0) {
-            cable_decoder_feed(&s_decoder, chunk, (size_t)n, s_cb, s_ctx);
+            cable_decoder_feed(&s_decoder, chunk, (size_t)n, s_cb, cable_xport_ctx(CABLE_XPORT_USB));
             last_rx_us = now;
         }
         if (s_tick) s_tick(s_ctx);
@@ -235,12 +239,22 @@ bool cable_link_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx)
     return true;
 }
 
+void cable_link_set_active(cable_xport_t x) { atomic_store(&s_active, (int)x); }
+cable_xport_t cable_link_active(void) { return (cable_xport_t)atomic_load(&s_active); }
+
 bool cable_link_send(uint8_t type, const uint8_t *payload, size_t payload_len)
 {
+    return cable_link_send_to(atomic_load(&s_active) == CABLE_XPORT_TCP ? CABLE_XPORT_TCP : CABLE_XPORT_USB,
+                              type, payload, payload_len);
+}
+
+bool cable_link_send_to(cable_xport_t x, uint8_t type, const uint8_t *payload, size_t payload_len)
+{
     if (!s_running) return false;
+    if (x == CABLE_XPORT_TCP && !wifi_cable_client()) return false;   // no peer: not an error, not a write
 
     xSemaphoreTake(s_tx_lock, portMAX_DELAY);
-    const bool ok = send_locked(type, payload, payload_len, pdMS_TO_TICKS(WRITE_WAIT_MS));
+    const bool ok = send_locked(x, type, payload, payload_len, pdMS_TO_TICKS(WRITE_WAIT_MS));
     const bool too_big = payload_len > CABLE_MAX_PAYLOAD;
     xSemaphoreGive(s_tx_lock);
 
