@@ -25,6 +25,8 @@ import { CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
 import { DialLog } from './dialLog.js'
 import { FirmwareTransfer } from './fwPush.js'
 import { SerialLink, findDialPort } from './serial.js'
+import { bindTokenForTcp, bindTokenForUsb, isTcpDialPath } from './dialBind.js'
+import { readWifi, wifiCredentialProblem, type DialWifi } from './dialWifi.js'
 import { PassageCarry, withCarriedPassage, type CarryRead } from './passageCarry.js'
 import { VoiceDraft, type DraftPin } from './voiceDraft.js'
 import { QuestionInbox, type ReviewedAnswer, type AnswerReceipt, type QuestionSpeech } from './questionInbox.js'
@@ -398,6 +400,10 @@ export interface DialStatus {
   /** Which of the two dials this is — `cst9217+axp2101`, `cst816s`, … — as the firmware detected itself
    *  at boot (device: board.h). Absent from a firmware that predates the field. Informational. */
   hw?: string
+  /** WiFi as the device last reported it (`hello.wifi`, `wifi.status`). Never carries the password. */
+  wifi?: DialWifi
+  /** `tcp` when the session is on WiFi. Absent means the cable (or nothing has ever been open). */
+  transport?: 'usb' | 'tcp'
   updating?: string
   /**
    * Every device on this computer, when a fleet is reporting. Present only on the primary status, and
@@ -480,6 +486,8 @@ export class CableSession {
   private everGreeted = false
   /** The board this device says it is (`hello.hw`). Decides which firmware it may be offered. */
   private greetedHw: string | undefined
+  private greetedWifi: DialWifi | undefined
+  private transport: 'usb' | 'tcp' | undefined
   /** What the device last SAID its settings are. Never what this computer last asked for. */
   private greetedSettings: DeviceSettings | undefined
   private greetedFw: string | null = null
@@ -582,6 +590,8 @@ export class CableSession {
     /** The dial's console, as a file: framed device logs and this side's `cable:` events, one day each. */
     private readonly dialLog: DialLog,
     private readonly openPort: PortOpener = openDialPort,
+    /** `expectMac`: a WiFi session is for ONE dial; a hello from any other is not welcomed. */
+    private readonly options: { expectMac?: string } = {},
   ) {}
 
   /**
@@ -615,7 +625,8 @@ export class CableSession {
   // ── port lifecycle ────────────────────────────────────────────────────────────────────────────────
 
   private reportForeign(path: string, why: string): void {
-    if (this.everGreeted) return
+    // A WiFi peer is only ever one this computer already holds a token for: never a stranger to rule out.
+    if (this.everGreeted || isTcpDialPath(path)) return
     this.host.onForeignPort?.(path, why)
   }
 
@@ -766,6 +777,7 @@ export class CableSession {
     this.bytesSinceOpen = 0
     this.framesSinceOpen = 0
     this.link = opened
+    this.transport = isTcpDialPath(opened.path) ? 'tcp' : 'usb'
     // Leftover bytes belong to a session that has ended; carrying them across would put a stale
     // half-frame in front of the first real frame of the new one.
     this.decoder.reset()
@@ -811,6 +823,8 @@ export class CableSession {
       attached: false,
       ...(this.greetedMac ? { mac: this.greetedMac } : {}),
       ...(this.greetedSettings ? { settings: this.greetedSettings } : {}),
+      ...(this.greetedWifi ? { wifi: this.greetedWifi } : {}),
+      ...(this.transport === 'tcp' ? { transport: 'tcp' as const } : {}),
     })
     this.link = null
     this.greetedMac = null
@@ -886,6 +900,21 @@ export class CableSession {
           return
         }
         const mac = str('mac') ?? ''
+        const tcp = isTcpDialPath(this.link?.path ?? '')
+        if (tcp && this.options.expectMac && mac.toUpperCase() !== this.options.expectMac.toUpperCase()) {
+          await this.refuseTcp(`peer answered as ${mac || 'no mac'}, not the dial looked for`)
+          return
+        }
+        // The cable is the authorization. Over USB a dial that greets is given (or reminded of) this
+        // computer's token; over WiFi it is welcomed only with a token minted at some earlier USB session.
+        let bind: string | null = null
+        try { bind = tcp ? bindTokenForTcp(mac) : bindTokenForUsb(mac) } catch (err) {
+          this.log(`cable: cannot read or write the WiFi pairing token: ${(err as Error).message}`)
+        }
+        if (tcp && !bind) {
+          await this.refuseTcp(`dial ${mac || '?'} is not USB-paired to this computer`)
+          return
+        }
         // Rule 1: every greeting is answered, but only an unfamiliar dial gets the full state.
         await this.send({
           t: 'welcome',
@@ -911,6 +940,7 @@ export class CableSession {
             // its own settings screens and never reports.
             'settings',
           ],
+          ...(bind ? { bind } : {}),
         })
         // Log a dial that is new OR that came back running something else. The version half of that test
         // is not decoration: a dial reboots into its new image after an update and greets with the SAME
@@ -925,7 +955,10 @@ export class CableSession {
         const settings = readSettings(msg.settings)
         const settingsChanged = JSON.stringify(settings) !== JSON.stringify(this.greetedSettings)
         if (settings) this.greetedSettings = settings
-        if (settingsChanged && mac === this.greetedMac && fw === this.greetedFw) this.report()
+        const wifi = readWifi(msg.wifi)
+        const wifiChanged = wifi !== undefined && JSON.stringify(wifi) !== JSON.stringify(this.greetedWifi)
+        if (wifi) this.greetedWifi = wifi
+        if ((settingsChanged || wifiChanged) && mac === this.greetedMac && fw === this.greetedFw) this.report()
         if (mac !== this.greetedMac || fw !== this.greetedFw) {
           const returning = mac === this.greetedMac
           this.greetedMac = mac
@@ -945,7 +978,16 @@ export class CableSession {
         // Offered on every greeting, but only ONCE per version per session: accepting makes the dial erase
         // a flash slot before it answers, so a cadence of retries would spend erase cycles on the user's
         // hardware every fifteen seconds, and nothing about the next greeting changes what went wrong.
-        await this.maybeOfferFirmware(str('fw') ?? '')
+        // Never over WiFi: an erase-and-write on a link that can drop is for the cable.
+        if (!tcp) await this.maybeOfferFirmware(str('fw') ?? '')
+        return
+      }
+      case 'wifi.status': {
+        const wifi = readWifi(msg)
+        if (!wifi) return
+        const changed = JSON.stringify(wifi) !== JSON.stringify(this.greetedWifi)
+        this.greetedWifi = wifi
+        if (changed && this.greetedMac !== null) this.report()
         return
       }
       case 'pong':
@@ -1652,6 +1694,8 @@ export class CableSession {
       ...(this.greetedHw ? { hw: this.greetedHw } : {}),
       ...(this.greetedMac ? { mac: this.greetedMac } : {}),
       ...(this.greetedSettings ? { settings: this.greetedSettings } : {}),
+      ...(this.greetedWifi ? { wifi: this.greetedWifi } : {}),
+      ...(this.transport === 'tcp' ? { transport: 'tcp' as const } : {}),
       ...extra,
     })
   }
@@ -1673,8 +1717,46 @@ export class CableSession {
     return sent
   }
 
+  /**
+   * Point the device at a WiFi network. USB only, by construction: `send` refuses these two messages on
+   * any other link, so the password can never cross the LAN whoever calls this. The answer is a
+   * `wifi.status`, which arrives as an ordinary status update. The password is never logged.
+   */
+  async setWifi(ssid: string, psk: string): Promise<{ ok: boolean; error?: string }> {
+    const problem = wifiCredentialProblem(ssid, psk)
+    if (problem) return { ok: false, error: problem }
+    return this.sendUsbOnly({ t: 'wifi.set', ssid, psk }, 'set')
+  }
+
+  /** Erase the device's saved network. USB only, like `setWifi`. */
+  async forgetWifi(): Promise<{ ok: boolean; error?: string }> {
+    return this.sendUsbOnly({ t: 'wifi.forget' }, 'forget')
+  }
+
+  private async sendUsbOnly(msg: Message, what: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.link?.isOpen || this.greetedMac === null) return { ok: false, error: 'The device is not on the wire.' }
+    if (isTcpDialPath(this.link.path)) return { ok: false, error: 'WiFi settings are only changed over the USB cable.' }
+    if (!(await this.send(msg))) return { ok: false, error: 'The device did not take it.' }
+    this.log(`cable: wifi ${what} sent`)
+    return { ok: true }
+  }
+
+  /** A WiFi peer this computer will not talk to: say why, close it, and do not come straight back. */
+  private async refuseTcp(why: string): Promise<void> {
+    const path = this.link?.path ?? null
+    this.log(`cable: tcp ${why} — releasing`)
+    this.foreignPort = path
+    this.foreignRetryAt = Date.now() + 60_000
+    await this.link?.close('not usb-paired')
+    this.link = null
+  }
+
   private async send(msg: Message): Promise<boolean> {
     if (!this.link?.isOpen) return false
+    if ((msg.t === 'wifi.set' || msg.t === 'wifi.forget') && isTcpDialPath(this.link.path)) {
+      this.log(`cable: ${msg.t} refused, it goes over USB only`)
+      return false
+    }
     try {
       await this.link.write(encodeCableFrame(CableType.Json, Buffer.from(JSON.stringify(msg), 'utf8')))
       return true
