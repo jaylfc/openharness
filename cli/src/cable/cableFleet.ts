@@ -283,10 +283,12 @@ export class CableFleet {
   private startBrowsing(lan: LanOptions): void {
     if (this.browser || Date.now() < this.browseRetryAt) return
     try {
-      this.browser = (lan.browse ?? browseDials)(why => {
+      const onError = (why: string) => {
         if (!this.browseDownNoted) this.host.log(`cable: WiFi discovery error: ${why}`)
         this.browseDownNoted = true
-      })
+      }
+      this.browser = lan.browse ? lan.browse(onError) : browseDials(onError, { log: line => this.host.log(line) })
+      this.host.log('cable: looking for paired dials on the network')
       this.browseDownNoted = false
     } catch (error) {
       if (!this.browseDownNoted) this.host.log(`cable: WiFi discovery is not available: ${String(error)}`)

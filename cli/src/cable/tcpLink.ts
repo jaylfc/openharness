@@ -27,39 +27,104 @@ interface Advertised {
   txt?: Record<string, unknown>
 }
 
+/** The bit of bonjour-service this uses, so a test can stand in for the network. */
+interface BonjourLike {
+  find(opts: { type: string; protocol: 'tcp' }): { on(event: 'up' | 'down', fn: (service: Advertised) => void): unknown; stop(): void }
+  destroy(): void
+}
+
+export interface BrowseOptions {
+  /** How often the browse is started afresh. One long browse asks less and less often, and a dial that
+   *  missed the first question can go minutes unseen; a fresh short one is what found dials reliably. */
+  refreshMs?: number
+  /** Said when a dial appears on the network and when it leaves it. */
+  log?: (line: string) => void
+  /** A stand-in for the network, for tests. */
+  bonjour?: (onError: (why: string) => void) => BonjourLike
+}
+
+/** The dial's advertised MAC: its TXT `mac`, which may arrive as text or as bytes. */
 const macOf = (service: Advertised): string => {
   const raw = service.txt?.mac
-  return typeof raw === 'string' ? raw.trim().toUpperCase() : ''
+  const text = typeof raw === 'string' ? raw : Buffer.isBuffer(raw) ? raw.toString('utf8') : ''
+  return text.trim().toUpperCase()
+}
+
+/** The last two MAC bytes, which the dial also puts in its name (`harness-4F98`): 4F98. */
+const tagOfMac = (mac: string): string => mac.replace(/[^0-9A-F]/gi, '').slice(-4).toUpperCase()
+const tagOfName = (service: Advertised): string => {
+  const m = /harness-([0-9a-f]{4})(?:\b|\.|$)/i.exec(`${service.host ?? ''} ${service.name ?? ''}`)
+  return m ? m[1].toUpperCase() : ''
 }
 
 /**
  * A long-lived browse for dials. Started only while some paired dial is out of reach, and stopped
  * as soon as none is, so a computer with no paired dial (or no network) never opens a multicast socket.
  * Throws if the socket cannot be made; the caller treats that as "no network right now".
+ *
+ * A dial is matched by the MAC in its TXT record, or, when a resolver drops the TXT, by the name it also
+ * carries; either way the session refuses a hello from any other MAC, so a wrong match connects to
+ * nothing. Its address is the IPv4 from the announcement, else its `.local` name, which the system
+ * resolves.
  */
-export function browseDials(onError: (why: string) => void = () => {}): DialBrowser {
-  const seen = new Map<string, DialAddress>()
-  const byName = new Map<string, string>()
-  const bonjour = new Bonjour({}, (error: unknown) => onError(String(error)))
-  const browser = bonjour.find({ type: DIAL_MDNS_TYPE, protocol: 'tcp' })
-  browser.on('up', (service: Advertised) => {
-    const mac = macOf(service)
-    const host = service.addresses?.find(a => isIP(a) === 4) ?? service.addresses?.[0]
-    if (!mac || !host) return
-    seen.set(mac, { host, port: service.port || DIAL_TCP_PORT })
-    if (service.name) byName.set(service.name, mac)
-  })
-  browser.on('down', (service: Advertised) => {
-    const mac = macOf(service) || (service.name ? byName.get(service.name) : undefined)
-    if (mac) seen.delete(mac)
-    if (service.name) byName.delete(service.name)
-  })
+export function browseDials(onError: (why: string) => void = () => {}, options: BrowseOptions = {}): DialBrowser {
+  const refreshMs = options.refreshMs ?? 15_000
+  type Seen = DialAddress & { at: number; mac: string; tag: string }
+  const seen = new Map<string, Seen>()   // by MAC when advertised, else by tag
+  let bonjour: BonjourLike | undefined
+  let browser: ReturnType<BonjourLike['find']> | undefined
+  let stopped = false
+
+  const keyOf = (mac: string, tag: string) => mac || `tag:${tag}`
+  const start = () => {
+    bonjour = (options.bonjour ?? ((err) => new Bonjour({}, (error: unknown) => err(String(error))) as unknown as BonjourLike))(onError)
+    browser = bonjour.find({ type: DIAL_MDNS_TYPE, protocol: 'tcp' })
+    browser.on('up', (service: Advertised) => {
+      const mac = macOf(service)
+      const tag = tagOfName(service) || (mac ? tagOfMac(mac) : '')
+      const host = service.addresses?.find(a => isIP(a) === 4) ?? service.addresses?.[0] ?? service.host
+      if ((!mac && !tag) || !host) return
+      const key = keyOf(mac, tag)
+      const before = seen.get(key)
+      seen.set(key, { host, port: service.port || DIAL_TCP_PORT, at: Date.now(), mac, tag })
+      if (!before || before.host !== host) options.log?.(`cable: a dial is on the network: ${mac || service.name || tag} at ${host}:${service.port || DIAL_TCP_PORT}`)
+    })
+    browser.on('down', (service: Advertised) => {
+      const mac = macOf(service)
+      const tag = tagOfName(service) || (mac ? tagOfMac(mac) : '')
+      const key = keyOf(mac, tag)
+      if (seen.delete(key)) options.log?.(`cable: a dial left the network: ${mac || service.name || tag}`)
+    })
+  }
+  const stopOne = () => {
+    try { browser?.stop() } catch { /* already stopped */ }
+    try { bonjour?.destroy() } catch { /* already destroyed */ }
+    browser = bonjour = undefined
+  }
+
+  start()
+  const timer = setInterval(() => {
+    if (stopped) return
+    // Whatever was not heard again across the last two rounds is gone (a dial that lost power says no goodbye).
+    for (const [key, entry] of seen) {
+      if (Date.now() - entry.at > refreshMs * 2.5) { seen.delete(key); options.log?.(`cable: a dial left the network: ${entry.mac || entry.tag}`) }
+    }
+    stopOne()
+    try { start() } catch (error) { onError(String(error)) }
+  }, refreshMs)
+  timer.unref?.()
+
   return {
-    find: mac => seen.get(mac.trim().toUpperCase()),
+    find: mac => {
+      const wanted = mac.trim().toUpperCase()
+      const hit = seen.get(wanted) ?? seen.get(`tag:${tagOfMac(wanted)}`)
+      return hit ? { host: hit.host, port: hit.port } : undefined
+    },
     stop: () => {
+      stopped = true
+      clearInterval(timer)
       seen.clear()
-      try { browser.stop() } catch { /* already stopped */ }
-      try { bonjour.destroy() } catch { /* already destroyed */ }
+      stopOne()
     },
   }
 }
