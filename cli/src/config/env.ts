@@ -373,7 +373,7 @@ const envSchema = z.object({
   // Manifest URL (same GCS bucket + metadata.json shape as the device OTA; key = ADAPTER_UPDATE_KEY).
   ADAPTER_UPDATE_URL: z
     .string()
-    .default('https://storage.googleapis.com/s3-autonomous-upgrade-3/harness/cli/metadata.json'),
+    .default('https://raw.githubusercontent.com/jaylfc/openharness/fork-updates/harness/cli/metadata.json'),
   ADAPTER_UPDATE_KEY: z.string().default('cli'),
   // How often the daemon checks for a newer build (ms). The poll is a tiny no-cache metadata fetch;
   // the artifact is downloaded only when the manifest version is strictly newer.
@@ -428,7 +428,7 @@ const envSchema = z.object({
   // `make upload-circle` remains the only way a release happens — this only changes who downloads.
   CABLE_FW_MANIFEST_URL: z
     .string()
-    .default('https://storage.googleapis.com/s3-autonomous-upgrade-3/harness/esp32/ota/metadata.json'),
+    .default('https://raw.githubusercontent.com/jaylfc/openharness/fork-updates/harness/esp32/ota/metadata.json'),
   CABLE_FW_DISABLE: z.string().default('false').transform((v) => v === 'true'),
 })
 
