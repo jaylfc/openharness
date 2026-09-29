@@ -245,8 +245,22 @@ jobs:
           set -euo pipefail
           git fetch --quiet https://github.com/autonomous-ai/openharness.git +main:refs/remotes/upstream/main
           base="$(git merge-base HEAD upstream/main)"
-          specs="$(git diff --name-only --diff-filter=AM "$base" HEAD -- 'cli/src/*.spec.ts' 'cli/src/*.test.ts' | sed 's#^cli/##' | tr '\n' ' ')"
-          files="$(git diff --name-only --diff-filter=AM "$base" HEAD -- 'desktop/*.dart' | sed 's#^desktop/##' | tr '\n' ' ')"
+          # Paths become shell arguments in later steps, so every one is checked against a strict
+          # whitelist here (no spaces, no metacharacters) and the job fails on anything else, rather
+          # than trusting file names a patch happens to contain. NUL-delimited so git cannot quote them.
+          list() { # list <strip-prefix> <pathspec>...
+            local strip="$1"; shift
+            local out="" path
+            while IFS= read -r -d '' path; do
+              if [[ ! "$path" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+                echo "::error::refusing a changed path with unexpected characters: $path"; exit 1
+              fi
+              out+="${path#"$strip"} "
+            done < <(git diff -z --name-only --diff-filter=AM "$base" HEAD -- "$@")
+            printf '%s' "$out"
+          }
+          specs="$(list cli/ 'cli/src/*.spec.ts' 'cli/src/*.test.ts')"
+          files="$(list desktop/ 'desktop/*.dart')"
           echo "changed CLI specs: ${specs:-none}"
           echo "changed Dart files: ${files:-none}"
           { echo "specs=$specs"; echo "files=$files"; } >> "$GITHUB_OUTPUT"
@@ -259,8 +273,8 @@ jobs:
           SPECS: ${{ steps.changed.outputs.specs }}
         run: |
           set -euo pipefail
-          # shellcheck disable=SC2086
-          (cd cli && npx vitest run src/cable $SPECS)
+          read -r -a specs <<< "$SPECS"   # whitelisted above: no spaces or globs inside a path
+          (cd cli && npx vitest run src/cable "${specs[@]}")
           bash fork/scripts/run_cli_specs.sh
 
       - name: Fork script tests
@@ -281,9 +295,10 @@ jobs:
         env:
           FILES: ${{ steps.changed.outputs.files }}
         run: |
+          set -euo pipefail
+          read -r -a files <<< "$FILES"   # whitelisted above: no spaces or globs inside a path
           flutter pub get
-          # shellcheck disable=SC2086
-          flutter analyze $FILES
+          flutter analyze "${files[@]}"
 
   # 4. Builds. Each uploads its artifacts under asset-*; publish gathers them.
   build-cli:
@@ -424,13 +439,13 @@ jobs:
           key: idf-components-${{ hashFiles('devices/harness-device/firmware/dependencies.lock') }}
       # Upstream's own host tests for the firmware (plain cc + python3; the ones that need the SDK's cJSON
       # run because IDF_PATH is set here). They gate the image: a stack that changes the dial link is
-      # where they earn their keep.
+      # where they earn their keep. gcc's -Werror differences from upstream's clang are handled in the script.
       - name: Firmware host tests
         shell: bash
         run: |
           set -euo pipefail
           . "$IDF_PATH/export.sh" >/dev/null
-          bash devices/harness-device/firmware/test/run.sh
+          bash fork/scripts/firmware_host_tests.sh
       - name: Build
         shell: bash
         run: |
