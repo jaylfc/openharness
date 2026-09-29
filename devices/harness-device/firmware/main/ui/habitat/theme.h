@@ -1,12 +1,10 @@
 #pragma once
 
-// One black surface, two neutral inks, one companion/action accent.
-// Canvas is TRUE black: the panel is AMOLED, where a black pixel is simply off. It draws no power, has
-// no backlight glow to lift it, and gives the inks their full contrast. (Upstream uses charcoal
-// #181818 to match the desktop terminal pane; this fork trades that match for the glass.)
+// One charcoal surface, two neutral inks, one companion/action accent.
+// Canvas matches the desktop terminal pane and Cmd N / Cmd P surfaces.
 // All colors are RGB565-representable at full brightness. Conversion and the
 // existing saved brightness setting remain at the UI boundary; no theme heap.
-#define HT_THEME_CANVAS    0x000000u
+#define HT_THEME_CANVAS    0x181818u
 #define HT_THEME_TEXT      0xefe7deu
 #define HT_THEME_SECONDARY 0xada6adu
 #ifdef DEVICE_HABITAT_ORANGE

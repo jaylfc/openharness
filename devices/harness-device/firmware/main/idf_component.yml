@@ -42,10 +42,3 @@ dependencies:
   # libsodium — the E2EE crypto stack (Ed25519, X25519, ristretto255 CPace, ChaCha20-Poly1305,
   # SHA-2, HKDF/HMAC). Backs devices/harness-device/firmware/main/e2ee/e2ee_core.c (byte-identical twin of the web/adapter
   # TS core). The Espressif port wires randombytes to the hardware RNG. See e2ee_core.h.
-
-  # mDNS for the optional LAN transport (main/wifi_cable.c): the dial advertises _harness-dial._tcp so
-  # the paired daemon can find it without an address. Not in ESP-IDF's own tree since 5.0.
-  espressif/mdns:
-    version: "^1.4.0"
-    rules:
-      - if: "target in [esp32s3]"

@@ -117,8 +117,6 @@ export interface HookServerHandlers {
   onGroupList?: () => PairOutcome
   onGroupSync?: () => PairOutcome
   onGroupRemove?: (selector: string) => PairOutcome
-  /** `harness dial wifi` — set, forget or read the WiFi of a dial. `psk` is passed through, never kept. */
-  onDialWifi?: (req: { op: 'set' | 'forget' | 'status'; device?: string; ssid?: string; psk?: string }) => Promise<PairOutcome>
   /** Local dashboard status snapshot (GET /api/status). */
   onStatus?: () => Record<string, unknown> | Promise<Record<string, unknown>>
   /** Recent adapter log tail (GET /api/logs). */
@@ -666,25 +664,6 @@ export function startHookServer(
         if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
         if (!handlers.onClearRemotePassword) { json(503, { error: 'UNAVAILABLE' }); return }
         const out = handlers.onClearRemotePassword(); json(out.status, out.body); return
-      }
-
-      // `harness dial wifi` → the dial's WiFi, over the running daemon's USB session. The password is in
-      // the body of this loopback call and nowhere else: not in the URL, not logged, not echoed back.
-      if (url === '/api/dial/wifi' && (req.method === 'POST' || req.method === 'GET')) {
-        if (!localOk) { json(403, { error: 'FORBIDDEN' }); return }
-        if (!handlers.onDialWifi) { json(503, { error: 'UNAVAILABLE' }); return }
-        let body: { op?: unknown; device?: unknown; ssid?: unknown; psk?: unknown } = { op: 'status' }
-        if (req.method === 'POST') {
-          try { body = JSON.parse(await readBody(req)) as typeof body } catch { json(400, { error: 'bad json' }); return }
-        }
-        if (body.op !== 'set' && body.op !== 'forget' && body.op !== 'status') { json(400, { error: 'BAD_OP' }); return }
-        if (body.device !== undefined && typeof body.device !== 'string') { json(400, { error: 'BAD_DEVICE' }); return }
-        if (body.op === 'set' && (typeof body.ssid !== 'string' || typeof body.psk !== 'string')) { json(400, { error: 'BAD_WIFI' }); return }
-        try {
-          const out = await handlers.onDialWifi({ op: body.op, device: body.device, ssid: body.ssid as string | undefined, psk: body.psk as string | undefined })
-          json(out.status, out.body)
-        } catch { json(500, { error: 'INTERNAL' }) }
-        return
       }
 
       // `harness link connect` → trust the machine just linked back, on the daemon's live E2EE state.

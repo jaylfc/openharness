@@ -1,17 +1,9 @@
 // The USB transport under cable_frame: bytes in from the native USB port, frames out to it.
 //
-// This is the device's connection to the outside world: the native USB port, and — only for a computer
-// that has already been plugged in — an optional second transport over the LAN (wifi_cable.c).
-//
-// USB is the authorization. Plugging the cable in is what binds a computer to this dial (the daemon
-// sends a `bind` token in `welcome`, see cable_client.c), and the LAN transport only ever carries the
-// same frames for a computer that presents it. The WiFi side is opt-in and self-contained: without a
-// saved network it is never started and costs nothing. Everything the dial says goes through the
-// functions below; a frame goes out on the active transport (the greeting on both).
-//
-// USB WINS. While a USB session is up the LAN client is dropped and new LAN connections are closed. The
-// LAN carries frames and nothing else: the console and the LOG frames stay on the cable, so a serial
-// monitor and the daemon's log file work exactly as before.
+// This is the whole of the device's connection to the outside world. There is no WiFi on this firmware
+// and there is not going to be — plugging the cable in is the authorization, and dropping the network
+// takes provisioning, pairing, a backend socket, E2EE and a reconnect ladder out of the design with it.
+// So everything the dial ever says goes through the two functions below.
 //
 // ── ONE PORT, AND WHAT THAT COSTS ───────────────────────────────────────────────────────────────────
 // Measured on the board on 2026-08-24: it enumerates as exactly one device —
@@ -46,10 +38,6 @@
 // decoder's own buffer — it is only valid for the duration of the call. Anything that must outlive it
 // gets copied by the callback. Anything that touches LVGL takes display_lock() first.
 //
-// The callback's `ctx` argument is NOT the `ctx` passed here: it names the transport the frame arrived
-// on (cable_xport_of). The LAN transport calls the same callback from its own task, so the callback
-// must be safe to enter from two tasks. `ctx` here goes to `tick` only.
-//
 // Returns false if the driver would not install, which leaves the dial running with no link rather than
 // failing to boot: a device that shows "Not connected" is diagnosable from across the room, and a device
 // stuck in a boot loop is not.
@@ -57,18 +45,6 @@
 // Keep connection expiry here so it cannot race a welcome/frame callback on
 // another core. It must be bounded and must not retain decoder payloads.
 typedef void (*cable_tick_cb)(void *ctx);
-
-// Which wire a frame came from or goes to.
-typedef enum {
-    CABLE_XPORT_NONE = 0,
-    CABLE_XPORT_USB,
-    CABLE_XPORT_TCP,
-} cable_xport_t;
-
-// The transport a frame callback's `ctx` names.
-static inline void *cable_xport_ctx(cable_xport_t x) { return (void *)(uintptr_t)x; }
-static inline cable_xport_t cable_xport_of(void *ctx) { return (cable_xport_t)(uintptr_t)ctx; }
-
 bool cable_link_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx);
 
 // Frame `payload` and write it to the port. Returns true when the whole frame went out.
@@ -78,23 +54,10 @@ bool cable_link_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx);
 // the dial sits unplugged or in front of a machine with no daemon for most of its life. Callers should
 // treat it as "not connected", never retry in a tight loop.
 //
-// The frame goes to the ACTIVE transport: the LAN client once a LAN session has been accepted (see
-// cable_link_set_active), the USB port otherwise. Use cable_link_send_to for the few messages that name
-// a wire.
-//
 // If a write is cut short mid-frame the peer sees a truncated frame, which its decoder resyncs past on
 // the next magic — that recovery is exactly what the CRC-plus-magic-scan exists for, so a bad moment
 // costs one message rather than the link.
 bool cable_link_send(uint8_t type, const uint8_t *payload, size_t payload_len);
-
-// Send to one named transport regardless of which is active: the greeting goes to both wires, and a
-// reply goes back on the wire its request came in on. Returns false when that transport has no peer.
-bool cable_link_send_to(cable_xport_t x, uint8_t type, const uint8_t *payload, size_t payload_len);
-
-// Set by the session layer when a session is accepted (USB or TCP) and cleared when it ends. NONE
-// behaves like USB for sending. The LAN task reads it to know that USB has won and the client must go.
-void cable_link_set_active(cable_xport_t x);
-cable_xport_t cable_link_active(void);
 
 // Route ESP_LOG through the link as CABLE_TYPE_LOG frames (true), or back to the plain console (false).
 //

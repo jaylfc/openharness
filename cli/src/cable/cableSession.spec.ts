@@ -11,8 +11,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
-import { CABLE_MAX_PAYLOAD, CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
-import { CableSession, fitText, type CableAgent, type CableHost, type CableMachine, type CablePort } from './cableSession.js'
+import { CableDecoder, CableType, encodeCableFrame } from './cableFrame.js'
+import { CableSession, type CableAgent, type CableHost, type CableMachine, type CablePort } from './cableSession.js'
 import { DialLog } from './dialLog.js'
 
 /** A port whose two ends are both in this process. */
@@ -551,9 +551,6 @@ describe('cable session', () => {
     )
     const welcome = port.sent[0]
     expect(welcome).toMatchObject({ t: 'welcome', app: 'harness', machine: { name: 'MacBook Pro' } })
-    // The computer's clock, for a device that shows the time (the CoreS3).
-    expect(Math.abs((welcome.now as number) - Date.now())).toBeLessThan(5000)
-    expect(welcome.tzOffsetMin).toBe(-new Date().getTimezoneOffset() || 0)
     // Streamed one per message: a hundred agents do not fit in one 8 KB frame, and the dial must not have
     // to reassemble anything.
     expect(port.sent.find((m) => m.t === 'agent')).toMatchObject({ t: 'agent', id: 'a1', name: 'Fix login screen', engine: 'claude' })
@@ -726,42 +723,6 @@ describe('cable session', () => {
     await settle()
     expect(host.sendTurn).toHaveBeenCalledWith('a2', 'flash it')
     await session.stop()
-  })
-
-  it('says so when the port is another product\'s, or never speaks at all, and never of a real dial', async () => {
-    // Told to whoever owns discovery, so a second ESP32 on the desk stops being opened every minute.
-    // A port that has been a dial is never reported: a hung or rebooting dial goes quiet and comes back.
-    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] })
-    try {
-      const reports: Array<[string, string]> = []
-      const host = makeHost({ onForeignPort: (path, why) => { reports.push([path, why]) } })
-
-      // 1. Another product's greeting.
-      const other = await connect(host)
-      other.port.say({ t: 'hello', product: 'grid', fw: '0.1.2', proto: 1, mac: 'aa:bb' })
-      await settle()
-      expect(reports).toEqual([['/dev/loopback', "greeted as 'grid'"]])
-      await other.session.stop()
-
-      // 2. A port that never says anything.
-      reports.length = 0
-      const quiet = await connect(host)
-      await settle()
-      for (let sec = 0; sec < 25; sec++) { vi.advanceTimersByTime(1_000); await settle() }
-      expect(reports).toEqual([['/dev/loopback', 'silent']])
-      await quiet.session.stop()
-
-      // 3. A real dial that then goes quiet is not written off.
-      reports.length = 0
-      const dial = await connect(host)
-      dial.port.say({ t: 'hello', product: 'harness', fw: '0.1.0', proto: 1, mac: 'aa:bb' })
-      await settle()
-      for (let sec = 0; sec < 25; sec++) { vi.advanceTimersByTime(1_000); await settle() }
-      expect(reports).toEqual([])
-      await dial.session.stop()
-    } finally {
-      vi.useRealTimers()
-    }
   })
 
   it("refuses a dial that names another product, and lets go of its port", async () => {
@@ -2285,23 +2246,5 @@ describe('spoken output search purpose', () => {
       expect(selectPassage).toHaveBeenLastCalledWith({op:'cancel',agentId:'a2',selectionId:'search-one',revision:3})
       expect(port.types()).not.toContain('voice.search'); expect(host.sendTurn).not.toHaveBeenCalled()
     } finally {await session.stop()}
-  })
-})
-
-describe('fitText', () => {
-  it('leaves a summary that fits alone', () => {
-    const msg = { t: 'summary', agentId: 'a1', recap: 'r', text: 'short answer' }
-    expect(fitText(msg)).toBe(msg)
-  })
-
-  it('cuts a long answer to one frame, marks the cut, and never splits a letter', () => {
-    const text = 'Tiếng Việt có dấu, "quoted"\n'.repeat(600)
-    const fitted = fitText({ t: 'summary', agentId: 'a1', recap: 'r', text })
-    expect(Buffer.byteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(CABLE_MAX_PAYLOAD)
-    expect(fitted.text.endsWith('…')).toBe(true)
-    expect(fitted.text).not.toContain('\uFFFD')
-    expect(text.startsWith(fitted.text.slice(0, -1))).toBe(true)
-    // Close to the cap, not far under it: the reader loses as little as it can.
-    expect(Buffer.byteLength(JSON.stringify(fitted))).toBeGreaterThan(CABLE_MAX_PAYLOAD - 64)
   })
 })

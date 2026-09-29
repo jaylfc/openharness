@@ -27,11 +27,6 @@ set(BOARD_SRCS
     "cable_scroll.c"
     "cable_json_guard.c"
     "cable_features.c"
-    # the optional LAN transport: a second way to carry the same frames, for the computer the cable bound
-    "lan_bind.c"
-    "lan_wifi_msg.c"
-    "wifi_sta.c"
-    "wifi_cable.c"
     "last_words.c"
     "fw_update.c"
     "audio_capture.c"
@@ -83,8 +78,6 @@ set(BOARD_REQUIRES
     esp_partition
     mbedtls
     esp_websocket_client
-    lwip
-    espressif__mdns
     esp-tls
     esp_lcd
     esp_lcd_touch

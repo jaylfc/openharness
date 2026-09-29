@@ -43,8 +43,6 @@ import { DialLog } from './cable/dialLog.js'
 import { buildLogBundle, bundleFileName, redactSecretsInText } from './lib/logBundle.js'
 import { CableSession } from './cable/cableSession.js'
 import { CableFleet } from './cable/cableFleet.js'
-import { dialWifiCommand } from './cable/dialWifiCommand.js'
-import { DialVerdicts } from './cable/dialPortVerdicts.js'
 import { DaemonCableHost, cableEventFor, cableQuestionFor, cableQuestionCloseFor } from './cable/cableHost.js'
 import { terminalActivity } from './cable/terminalActivity.js'
 
@@ -213,7 +211,6 @@ import { AgentNotifications } from './lib/agentNotifications.js'
 import {
   setSummaryPoolDeviceConnected,
   shutdownSummaryPool,
-  deriveReaderText,
   deriveTurnSummary,
   summarizeTurnText,
   syncSummaryPoolSessions,
@@ -460,7 +457,6 @@ Browser end-to-end encryption:
   harness pairings             list paired clients
   harness unpair <#|fp>        unpair one browser (by list number or fingerprint)
   harness unpair --all         unpair every browser
-  harness dial wifi <ssid>     give a USB-plugged dial a WiFi network (--forget, --status, --device <serial>)
 
 Machine-to-machine linking (lets this machine's relay reach ANOTHER of your machines with the CLI,
 not the app, terminating E2EE). A machine's remote password is persistent — set once, reused for
@@ -4185,15 +4181,6 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     },
     onClearRemotePassword: () => { backend.clearRemotePassword(); return { status: 200, body: { ok: true } } },
     onRemotePasswordStatus: () => ({ status: 200, body: backend.remotePasswordStatus() }),
-    onDialWifi: async (req) => {
-      const fleet = cableRef
-      if (!fleet) return { status: 503, body: { error: 'The dial service is not running.' } }
-      if (req.op === 'status') return { status: 200, body: { devices: fleet.wifiStatus() } }
-      const result = req.op === 'set'
-        ? await fleet.setWifi(req.device, req.ssid ?? '', req.psk ?? '')
-        : await fleet.forgetWifi(req.device)
-      return { status: result.ok ? 200 : 409, body: result }
-    },
     onTrustLinkedPeer: (peer) => {
       backend.trustPeer({ ...peer, kind: 'machine' })
       groupSyncer?.linked({ ...peer, kind: 'machine' })
@@ -6805,10 +6792,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
     try { writeFileSync(legacyDialLog, `moved to ${join(env.HARNESS_LOGS_DIR, 'dial-YYYYMMDD.log')}\n`) } catch { /* best effort */ }
   }
   const cable = new CableFleet(CableSession, cableHost, env.HARNESS_LOGS_DIR, DialLog,
-    { serials: process.env.HARNESS_DIAL_SERIALS?.split(',').map(s => s.trim()).filter(Boolean),
-      verdicts: new DialVerdicts(join(env.ADAPTER_DATA_DIR, 'dial-ports.json')),
-      // WiFi for dials this computer has been plugged into. Inert until one is; HARNESS_DIAL_LAN=0 turns it off.
-      ...(process.env.HARNESS_DIAL_LAN === '0' ? {} : { lan: {} }) })
+    { serials: process.env.HARNESS_DIAL_SERIALS?.split(',').map(s => s.trim()).filter(Boolean) })
   cableRef = cable
 
   const deviceStore = createDeviceStore({ dataDir: env.ADAPTER_DATA_DIR, machineId: backend.machineId,
@@ -6904,10 +6888,7 @@ async function runForeground(session: AuthSession | null): Promise<void> {
       // Quiet when the window already has this agent on screen; silent when the
       // turn was a sub-agent's. The tile still updates — the recap is what it
       // draws — only the beep and the drawer entry are withheld.
-      // The reader shows the whole answer, not the 250-character body the tile's glance is cut from.
-      const full = mirror.lastFullText(registry.byAgent(event.agentId)?.sessionId ?? event.agentId)
-      void cable.summary(event.agentId, event.recap || event.text, full ? deriveReaderText(full) : event.text,
-        alreadyOnScreen(event.agentId), event.subagent)
+      void cable.summary(event.agentId, event.recap || event.text, event.text, alreadyOnScreen(event.agentId), event.subagent)
     }
     else void cable.turnError(event.agentId, event.text)
   }
@@ -8103,25 +8084,6 @@ switch (cmd) {
     // command", for anyone following an old doc.
     console.error(`\n  ✗ harness ${cmd} was removed: the web client is retired. Use the desktop or phone app.\n`)
     process.exit(1)
-  case 'dial':
-    if (args[0] === 'wifi') {
-      dialWifiCommand(rest.slice(rest.indexOf('wifi') + 1), {
-        call: async (method, path, body) => {
-          const res = await fetch(`http://127.0.0.1:${daemonPort()}${path}`, {
-            method,
-            headers: { 'x-adapter-local': '1', ...(body ? { 'content-type': 'application/json' } : {}) },
-            body: body ? JSON.stringify(body) : undefined,
-          })
-          return { status: res.status, json: (await res.json().catch(() => ({}))) as Record<string, unknown> }
-        },
-        promptPassword,
-        isTTY: process.stdin.isTTY === true,
-        env: process.env,
-        output: (line) => console.log(line),
-        error: (line) => console.error(line),
-      }).then((code) => { process.exitCode = code }).catch(onError)
-    } else { console.error(`Unknown command: dial ${args[0] ?? ''}`); usage(1) }
-    break
   case 'pairings':
     pairingsCommand().catch(onError)
     break

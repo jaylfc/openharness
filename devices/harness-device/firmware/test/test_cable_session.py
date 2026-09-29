@@ -53,19 +53,7 @@ typedef void *TaskHandle_t;
 static TaskHandle_t hello_handle;
 static unsigned attempts, fail_at, live, hellos, notifications;
 static atomic_bool s_session, s_running;
-static void *s_tx_lock, *s_agents_lock, *s_models_sem, *s_rx_lock;
-// The LAN transport's share of the client (see cable_client.c): frames now name the wire they came on,
-// and a lock keeps the two delivering tasks apart. This test drives the USB path, so the lock is a check
-// that it exists and the transport marker is the USB one.
-#define LAN_BIND_LEN 64
-#define portMAX_DELAY 0
-typedef enum { CABLE_XPORT_NONE = 0, CABLE_XPORT_USB, CABLE_XPORT_TCP } cable_xport_t;
-static inline void *cable_xport_ctx(cable_xport_t x) { return (void *)(uintptr_t)x; }
-static char s_bind[LAN_BIND_LEN + 1];
-#define xSemaphoreTake(lock, wait) (assert(lock), (void)(wait), 1)
-#define xSemaphoreGive(lock) (assert(lock), 1)
-static bool config_load_bind(char *out, size_t cap) { (void)cap; out[0] = 0; return false; }
-static bool lan_bind_valid(const char *s) { return s[0] != 0; }
+static void *s_tx_lock, *s_agents_lock, *s_models_sem;
 static int s_machines;
 static int64_t now, s_last_rx_us;
 static unsigned read_index, ticks, down_count, frames;
@@ -88,12 +76,9 @@ static void session_down(const char *why) {
 code += function(client, 'session_tick')
 code += r'''
 static void on_frame(uint8_t version,uint8_t type,const uint8_t *p,size_t n,void *ctx) {
-    (void)version; (void)type; (void)p; (void)n; assert(ctx == cable_xport_ctx(CABLE_XPORT_USB) && owner == 1);
+    (void)version; (void)type; (void)p; (void)n; assert(ctx == NULL && owner == 1);
     frames++; s_last_rx_us = now; s_session = true; connected = true;
 }
-static void lan_closed(void) {}
-static void wifi_cable_init(cable_frame_cb cb, void (*closed)(void)) { assert(cb == on_frame && closed == lan_closed); }
-static void wifi_sta_prepare(void) {}
 static void cable_decoder_init(decoder_t *d) { d->len = 0; }
 static void cable_decoder_reset(decoder_t *d) { d->len = 0; }
 static void cable_decoder_feed(decoder_t *d,const uint8_t *p,size_t n,cable_frame_cb cb,void *ctx) {
@@ -137,7 +122,7 @@ static int xTaskCreate(void (*task)(void *),const char *name,int stack,void *arg
     if (fail_reader) return 0;
     assert(driver && s_running && s_tick && !connected && s_last_rx_us == now);
     // A welcome can arrive on the new reader before xTaskCreate returns.
-    owner = 1; s_cb(1,1,NULL,0,cable_xport_ctx(CABLE_XPORT_USB)); owner = 0; new_task_ready = true;
+    owner = 1; s_cb(1,1,NULL,0,s_ctx); owner = 0; new_task_ready = true;
     return pdPASS;
 }
 static void vTaskDelete(TaskHandle_t task) { assert(task==hello_handle&&hellos);hellos--;hello_handle=NULL; }
@@ -152,12 +137,12 @@ code += function(link, 'cable_link_start')
 code += function(client, 'cable_client_start')
 code += r'''
 int main(void) {
-    // Array, both metadata locks, the receive lock, handshake task, transmit lock, driver, reader.
+    // Array, both metadata locks, handshake task, transmit lock, driver, reader.
     // Every startup failure must release all resources and allow a clean retry.
-    for(unsigned failure=1;failure<=8;failure++) {
+    for(unsigned failure=1;failure<=7;failure++) {
         attempts=0;fail_at=failure;
         assert(!cable_client_start());
-        assert(!s_agents&&!s_agents_lock&&!s_models_sem&&!s_rx_lock&&!s_tx_lock&&!s_started);
+        assert(!s_agents&&!s_agents_lock&&!s_models_sem&&!s_tx_lock&&!s_started);
         assert(!s_running&&!driver&&!hellos&&!live&&!notifications);
     }
     attempts=fail_at=0;
@@ -175,9 +160,9 @@ int main(void) {
     assert(!cable_link_start(on_frame,session_tick,NULL));
     assert(!s_running && !driver && !s_tx_lock);
     free(s_agents);
-    vSemaphoreDelete(s_agents_lock);vSemaphoreDelete(s_models_sem);vSemaphoreDelete(s_rx_lock);vTaskDelete(hello_handle);
+    vSemaphoreDelete(s_agents_lock);vSemaphoreDelete(s_models_sem);vTaskDelete(hello_handle);
     assert(!live&&!hellos);
-    puts("USB session: eight startup failures/retries, idempotence, early welcome, idle/error reads, timeout/reconnect and 64-bit wrap PASS");
+    puts("USB session: seven startup failures/retries, idempotence, early welcome, idle/error reads, timeout/reconnect and 64-bit wrap PASS");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='harness-cable-session-') as folder:

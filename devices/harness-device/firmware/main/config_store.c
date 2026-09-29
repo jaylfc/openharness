@@ -1,7 +1,6 @@
 #include "config_store.h"
 #include <stdlib.h>
 #include <string.h>
-#include "lan_bind.h"
 #include "ram_telemetry.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -9,7 +8,6 @@
 
 static const char *TAG = "config";
 static const char *NS = "pair";
-static const char *NS_LAN = "lan";   // WiFi network + bind token; see config_store.h
 
 static void read_str(nvs_handle_t h, const char *key, char *dst, size_t cap);   // defined below
 
@@ -194,64 +192,6 @@ void config_save_swipe_reversed(bool reversed)
 #define K_FACH   "fach"
 #define K_FDCH   "fdch"
 
-// --- LAN: WiFi network and bind token -----------------------------------------------------------
-bool config_load_wifi(char *ssid, size_t ssid_cap, char *psk, size_t psk_cap)
-{
-    if (ssid_cap) ssid[0] = '\0';
-    if (psk_cap) psk[0] = '\0';
-    nvs_handle_t h;
-    if (nvs_open(NS_LAN, NVS_READONLY, &h) != ESP_OK) return false;
-    read_str(h, "ssid", ssid, ssid_cap);
-    read_str(h, "psk", psk, psk_cap);   // absent for an open network
-    nvs_close(h);
-    return ssid[0] != '\0';
-}
-
-bool config_save_wifi(const char *ssid, const char *psk)
-{
-    nvs_handle_t h;
-    if (nvs_open(NS_LAN, NVS_READWRITE, &h) != ESP_OK) return false;
-    bool ok = nvs_set_str(h, "ssid", ssid) == ESP_OK && nvs_set_str(h, "psk", psk ? psk : "") == ESP_OK &&
-              nvs_commit(h) == ESP_OK;
-    nvs_close(h);
-    ESP_LOGI(TAG, "save_wifi: %s", ok ? "ok" : "FAILED");   // never the psk
-    return ok;
-}
-
-bool config_clear_wifi(void)
-{
-    nvs_handle_t h;
-    if (nvs_open(NS_LAN, NVS_READWRITE, &h) != ESP_OK) return false;
-    nvs_erase_key(h, "ssid");
-    nvs_erase_key(h, "psk");
-    bool ok = nvs_commit(h) == ESP_OK;
-    nvs_close(h);
-    ESP_LOGI(TAG, "clear_wifi: %s", ok ? "ok" : "FAILED");
-    return ok;
-}
-
-bool config_load_bind(char *out, size_t cap)
-{
-    if (cap) out[0] = '\0';
-    nvs_handle_t h;
-    if (nvs_open(NS_LAN, NVS_READONLY, &h) != ESP_OK) return false;
-    read_str(h, "bind", out, cap);
-    nvs_close(h);
-    return out[0] != '\0';
-}
-
-bool config_save_bind(const char *bind)
-{
-    char cur[LAN_BIND_LEN + 1];
-    if (config_load_bind(cur, sizeof(cur)) && strcmp(cur, bind) == 0) return true;   // unchanged: no write
-    nvs_handle_t h;
-    if (nvs_open(NS_LAN, NVS_READWRITE, &h) != ESP_OK) return false;
-    bool ok = nvs_set_str(h, "bind", bind) == ESP_OK && nvs_commit(h) == ESP_OK;
-    nvs_close(h);
-    ESP_LOGI(TAG, "save_bind: %s", ok ? "ok" : "FAILED");   // never the token
-    return ok;
-}
-
 bool config_clear_all(void)
 {
     nvs_handle_t h;
@@ -259,13 +199,6 @@ bool config_clear_all(void)
     nvs_erase_all(h);
     bool ok = nvs_commit(h) == ESP_OK;
     nvs_close(h);
-    // The network and the bind go with everything else: a factory reset that left a saved psk behind
-    // would hand it to whoever holds the dial next.
-    if (nvs_open(NS_LAN, NVS_READWRITE, &h) == ESP_OK) {
-        nvs_erase_all(h);
-        ok = nvs_commit(h) == ESP_OK && ok;
-        nvs_close(h);
-    }
     ESP_LOGW(TAG, "clear_all: %s", ok ? "ok" : "FAILED");
     return ok;
 }

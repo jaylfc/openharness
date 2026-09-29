@@ -11,7 +11,7 @@
  */
 
 import { deriveTurnBody } from './deviceRecap.js'
-export { deriveTurnSummary, deriveTurnBody, deriveReaderText, RECAP_MAX_CHARS, RECAP_MIN_CHARS, BODY_MAX_CHARS } from './deviceRecap.js'
+export { deriveTurnSummary, deriveTurnBody, RECAP_MAX_CHARS, RECAP_MIN_CHARS, BODY_MAX_CHARS } from './deviceRecap.js'
 
 import { existsSync, mkdirSync } from 'fs'
 import { unlink } from 'fs/promises'

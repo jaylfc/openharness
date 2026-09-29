@@ -53,27 +53,5 @@ void config_save_scroll_reversed(bool reversed);
 bool config_load_swipe_reversed(void);
 void config_save_swipe_reversed(bool reversed);
 
-// ── the optional LAN transport (wifi_sta.c, wifi_cable.c) ───────────────────────────────────────────
-// Kept in a namespace of their own ("lan"), not "pair": the WiFi network and the bind token are
-// credentials, and nothing about brightness or scroll direction should share a wipe with them by
-// accident. config_clear_all() still forgets both.
-//
-// The psk is stored in plaintext, as the protocol allows; the flash is not encrypted on this board and a
-// person with the dial in hand has the screen and the cable anyway. It is never logged.
-#define CFG_WIFI_SSID_MAX 33   // 32 + nul
-#define CFG_WIFI_PSK_MAX  64   // 63 + nul
-
-// The saved network. False when there is none (out is left empty).
-bool config_load_wifi(char *ssid, size_t ssid_cap, char *psk, size_t psk_cap);
-bool config_save_wifi(const char *ssid, const char *psk);
-bool config_clear_wifi(void);
-
-// The token the last USB host bound this dial to: LAN_BIND_LEN hex characters (lan_bind.h). `cap` must
-// fit LAN_BIND_LEN + 1. False when none is stored. Save writes only if the value changed, because
-// `welcome` repeats every few seconds and flash wear is not free.
-bool config_load_bind(char *out, size_t cap);
-bool config_save_bind(const char *bind);
-
-// Factory reset (BOOT held at power-on, or Settings → Reset): forget all of the above, and the LAN
-// network and bind token with them.
+// Factory reset (BOOT held at power-on, or Settings → Reset): forget all of the above.
 bool config_clear_all(void);

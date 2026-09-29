@@ -28,9 +28,6 @@ code = r'''
 #define pdMS_TO_TICKS(ms) (ms)
 typedef int TickType_t;
 typedef int (*vprintf_like_t)(const char *,va_list);
-typedef enum { CABLE_XPORT_NONE = 0, CABLE_XPORT_USB, CABLE_XPORT_TCP } cable_xport_t;
-// Logs are NEVER framed onto the LAN transport: reaching this writer from the log sink is a failure.
-static bool wifi_cable_write(const uint8_t *p, size_t n) { (void)p; (void)n; assert(!"a log line reached the LAN writer"); return false; }
 static bool isr, lock_busy, recurse, stalled;
 static atomic_bool s_running, s_log_framing;
 static atomic_uint s_dropped_logs;
