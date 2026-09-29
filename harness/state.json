@@ -1,12 +1,12 @@
 {
-  "source_sha": "b3e756b9a9142635275976d40ce01700ac73189b",
+  "source_sha": "bf52fd9494289d4e76bda3e1bc536752be82708f",
   "upstream_sha": "249e0f9a1e95e2e3bfb183cea2dec0c468c09bef",
-  "tag": "dryrun-5",
-  "built_at": "2026-09-29T16:45:30Z",
+  "tag": "dryrun-6",
+  "built_at": "2026-09-29T16:56:03Z",
   "versions": {
-    "desktop": "1.2.29",
-    "cli": "0.3.29",
-    "firmware": "0.0.88"
+    "desktop": "1.2.30",
+    "cli": "0.3.30",
+    "firmware": "0.0.89"
   },
   "entries_updated": [
     "desktop-macos-arm64",
