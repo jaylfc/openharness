@@ -2164,8 +2164,12 @@ static void render_keyboard(ht_scene_t *f)
     agent_t *target = find(keyboard_agent) >= 0 ? &s.agents[find(keyboard_agent)] : NULL;
     bool can_send = s.connected && target;
     // "to <name>" on the top arc, cut to what one arc holds; the typed words are never drawn there.
-    char to[24];
-    snprintf(to, sizeof to, "to %.12s", target ? target->name : "?");
+    char to[3 + 4 * 12 + 1];
+    // Cut to 12 whole characters, not 12 bytes: an agent name may be UTF-8.
+    const char *end = target ? target->name : "?";
+    const char *name = end;
+    for (int cells = 0; *end && cells < 12; cells++) ht_utf8_next(&end);
+    snprintf(to, sizeof to, "to %.*s", (int)(end - name), name);
     ht_arc_title(f, DIM, to);
     control(f, 87, 67, 48, "<", A_MENU_OPEN, 0, true);
     // The last three lines of what is typed, with a cursor: the tail is what a person is looking for.
@@ -3313,6 +3317,15 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 // main-surface voice without a recipient is dropped.
                 dispatch(make_action((hit_t){.action = A_VOICE}));
             }
+        } else if (s.view == KEYBOARD && pressed_action.kind == A_KEY) {
+            // A key is pressed and released like the footer's buttons: a thumb that rests 400 ms is not a
+            // tap by the 350 ms rule, and a typist loses letters to that. Released on the key it went
+            // down on, without having travelled, is a press, up to the same 1.8 s.
+            bool on_target = s.pressed_rect.w && !gesture.moved &&
+                x >= s.pressed_rect.x && x < s.pressed_rect.x + s.pressed_rect.w &&
+                y >= s.pressed_rect.y && y < s.pressed_rect.y + s.pressed_rect.h;
+            if (result == HT_TOUCH_TAP || (on_target && now - s.touch_started < 1800)) dispatch(pressed_action);
+            change();
         } else if (result == HT_TOUCH_TAP && pressed_action.kind == A_PET &&
                    (surface || s.view == VOICE || s.view == SELECTION)) {
             ht_gesture_guard(&gesture, now);

@@ -1598,6 +1598,20 @@ static void shake_menu_checks(void) {
     habitat_touch(true,100,150,9000); habitat_touch(false,300,150,9100); assert(s.view==KEYBOARD && keyboard.len==1);
     habitat_touch(true,233,150,9200); habitat_touch(false,233,420,9300); assert(s.view==KEYBOARD && keyboard.len==1);   // a vertical drag does not leave either
     reset(); shake_clock=1000; ui_shake(); scene_take(); tap_menu_row(0); scene_take(); tap(9500,110,80); assert(s.view==SHAKE_MENU);
+    // a slow press is still a press: 500 ms on the key (over the 350 ms tap rule) types it; a drifting or a
+    // 2 s press does not
+    reset(); shake_clock=1000; ui_shake(); scene_take(); tap_menu_row(0); scene_take();
+    { ht_key_t k=ht_kb_key(key_by_label("q")); int cx=k.x+k.w/2, cy=k.y+k.h/2;
+      habitat_touch(true,cx,cy,20000); habitat_touch(false,cx,cy,20500); scene_take();
+      assert(keyboard.len==1 && !strcmp(keyboard.text,"q"));
+      habitat_touch(true,cx,cy,21000); habitat_touch(false,cx,cy,23000); scene_take(); assert(keyboard.len==1);
+      habitat_touch(true,cx,cy,24000); habitat_touch(true,cx+30,cy,24100); habitat_touch(false,cx+30,cy,24500); scene_take();
+      assert(keyboard.len==1 && s.view==KEYBOARD); }
+    // an agent name in UTF-8 is cut to whole characters on the arc
+    reset(); shake_clock=1000; strcpy(s.agents[0].name,"\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9");
+    ui_shake(); scene_take(); tap_menu_row(0); scene_take();
+    { const ht_run_t *arc=NULL; for (int i=0;i<scene.count;i++) if (scene.runs[i].arc==1) arc=&scene.runs[i];
+      assert(arc && strlen(arc->text)==3+12*2 && !strncmp(arc->text,"to ",3)); }
     // a long message keeps its tail on screen and stays inside the run budget
     reset(); shake_clock=1000; ui_shake(); scene_take(); tap_menu_row(0); scene_take();
     for (int i=0;i<200;i++) tap_key(i%9==8 ? "space" : "a");
