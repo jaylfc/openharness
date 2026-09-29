@@ -3,6 +3,7 @@
 // nothing here connects to a service whose TXT `mac` is not one it was asked for.
 import { isIP, Socket } from 'node:net'
 import Bonjour from 'bonjour-service'
+import { browseDialsDnsSd, type SpawnLike } from './dnsSdBrowse.js'
 
 export const DIAL_TCP_PORT = 17420
 export const DIAL_MDNS_TYPE = 'harness-dial'
@@ -39,8 +40,10 @@ export interface BrowseOptions {
   refreshMs?: number
   /** Said when a dial appears on the network and when it leaves it. */
   log?: (line: string) => void
-  /** A stand-in for the network, for tests. */
+  /** A stand-in for the network, for tests. Given, the browse always uses bonjour-service. */
   bonjour?: (onError: (why: string) => void) => BonjourLike
+  /** A stand-in for running `dns-sd`, for tests. */
+  spawn?: SpawnLike
 }
 
 /** The dial's advertised MAC: its TXT `mac`, which may arrive as text or as bytes. */
@@ -68,6 +71,9 @@ const tagOfName = (service: Advertised): string => {
  * resolves.
  */
 export function browseDials(onError: (why: string) => void = () => {}, options: BrowseOptions = {}): DialBrowser {
+  // macOS restricts LAN multicast for a daemon that its resolver does not vouch for, and the failure is
+  // silent (see dnsSdBrowse.ts); the resolver's own client always works, so that is what macOS uses.
+  if (!options.bonjour && process.platform === 'darwin') return browseDialsDnsSd(onError, options)
   const refreshMs = options.refreshMs ?? 15_000
   type Seen = DialAddress & { at: number; mac: string; tag: string }
   const seen = new Map<string, Seen>()   // by MAC when advertised, else by tag
