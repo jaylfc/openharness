@@ -553,7 +553,7 @@ describe('cable session', () => {
     expect(welcome).toMatchObject({ t: 'welcome', app: 'harness', machine: { name: 'MacBook Pro' } })
     // The computer's clock, for a device that shows the time (the CoreS3).
     expect(Math.abs((welcome.now as number) - Date.now())).toBeLessThan(5000)
-    expect(welcome.tzOffsetMin).toBe(-new Date().getTimezoneOffset())
+    expect(welcome.tzOffsetMin).toBe(-new Date().getTimezoneOffset() || 0)
     // Streamed one per message: a hundred agents do not fit in one 8 KB frame, and the dial must not have
     // to reassemble anything.
     expect(port.sent.find((m) => m.t === 'agent')).toMatchObject({ t: 'agent', id: 'a1', name: 'Fix login screen', engine: 'claude' })
