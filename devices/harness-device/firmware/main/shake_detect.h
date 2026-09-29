@@ -14,6 +14,9 @@
 // Waiting for the settle is what tells a shake from walking: a stride train keeps producing jolts about
 // every 500 ms, so its group never settles and runs past SHAKE_GROUP_MAX_MS, which discards it and
 // demands a fresh stillness before anything can start again. A single knock is a group of one and expires.
+// SHAKE_SETTLE_MS MUST EXCEED THE SLOWEST STRIDE PERIOD YOU WANT REJECTED: a strong train with a period
+// longer than the settle fires on its second pulse (800 ms rejects trains faster than 1.25 Hz; a train at
+// 0.9 Hz with peaks over the threshold would still open the menu once, which the threshold is there to make rare).
 //
 // AFTER A FIRE. SHAKE_COOLDOWN_MS of nothing, and because the stillness rule reads the last strong
 // sample, the tail of the same shake cannot start a new group either.
@@ -45,7 +48,7 @@
 #define SHAKE_PAIR_GAP_MS  1200   // longest pause inside one shake
 #endif
 #ifndef SHAKE_SETTLE_MS
-#define SHAKE_SETTLE_MS    600    // stillness after the last jolt before the shake is accepted
+#define SHAKE_SETTLE_MS    800    // stillness after the last jolt before the shake is accepted; see below
 #endif
 #ifndef SHAKE_GROUP_MAX_MS
 #define SHAKE_GROUP_MAX_MS 2400   // first jolt to last jolt; longer is a vibration, not a gesture
@@ -58,6 +61,8 @@
 #endif
 #define SHAKE_STALE_MS     (1u << 28)   // an old timestamp is forgotten before a clock wrap can alias it
 
+// `started` says last_start is meaningful; `has_strong` the same for last_strong; both are dropped after
+// SHAKE_STALE_MS so an old timestamp cannot alias across a clock wrap.
 typedef struct {
     bool has_strong, started, in_jolt, in_group, cooling;
     uint32_t last_strong, last_start, group_first, group_last, cool_until;

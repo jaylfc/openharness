@@ -100,18 +100,26 @@ int main(void)
     for (int i = 0; i < 40; i++) strong[i] = (jolt_t){1000u + 500u * i, 2200};
     run(&s, 0, 0, 22000, strong, 40, false, 1, 0);
     assert(fires == 0);
-    // slower walking, 1.5 Hz strong strides (667 ms): still under the settle time
+    // slower strides: 580, 667 and 750 ms all stay under the settle time, so none of them ever settles
+    static const uint32_t periods[] = {580, 667, 750};
+    for (unsigned k = 0; k < sizeof periods / sizeof periods[0]; k++) {
+        fresh(&s);
+        for (int i = 0; i < 40; i++) strong[i] = (jolt_t){1000u + periods[k] * i, 2200};
+        run(&s, 0, 0, 30000, strong, 40, false, 1, 0);
+        assert(fires == 0);
+    }
+    // the limit of the rule, stated: a strong train slower than the settle time fires once (its second pulse)
     fresh(&s);
-    for (int i = 0; i < 40; i++) strong[i] = (jolt_t){1000u + 580u * i, 2200};
-    run(&s, 0, 0, 25000, strong, 40, false, 1, 0);
-    assert(fires == 0);
+    for (int i = 0; i < 6; i++) strong[i] = (jolt_t){1000u + 1000u * i, 2200};
+    run(&s, 0, 0, 10000, strong, 6, false, 1, 0);
+    assert(fires == 1);
 
     // cooldown: a second shake 1.2 s after the first fired is swallowed; one after stillness fires
     fresh(&s);
     jolt_t again[] = {{3000, BIG}, {3400, BIG}, {4800, BIG}, {5200, BIG}, {12000, BIG}, {12400, BIG}};
     run(&s, 0, 0, 20000, again, 6, false, 1, 0);
     assert(fires == 2);
-    assert(fired_at[0] < 4200 && fired_at[1] > 12400);
+    assert(fired_at[0] < 4300 && fired_at[1] > 12400);
 
     // screen off: the shake counts for nothing, and the first moments after waking cannot arm it either
     fresh(&s);
