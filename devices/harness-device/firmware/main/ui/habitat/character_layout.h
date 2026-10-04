@@ -25,9 +25,10 @@ void ht_character_layout(ht_scene_t *s, const ht_character_face_t *f, uint8_t fr
  * The rectangles the roomy recap's rows occupy, top to bottom, from the same widths and row origin
  * ht_character_layout() writes them with. The rows are contiguous and each is as wide as its line may
  * be, so together they follow the round bezel instead of a bounding box that would leave it. Returns
- * how many were written (HT_CHARACTER_RECAP_ROWS), or 0 for a face with no roomy reading.
+ * how many were written (HT_CHARACTER_RECAP_ROWS), or 0 for a face with no roomy reading. `recap` is
+ * unused: these rows are fixed.
  */
-int ht_character_layout_recap_rows(const ht_character_face_t *f, ht_rect_t *out);
+int ht_character_layout_recap_rows(const ht_character_face_t *f, const char *recap, ht_rect_t *out);
 // Text-only inbox, deliberately distinct from the companion's home recap.
 void ht_inbox_card(ht_scene_t *scene, const char *mark, const char *name,
                    const char *message, uint16_t foreground, uint16_t status_ink);

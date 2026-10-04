@@ -73,19 +73,6 @@ static const char *const RESTING[] = {
     HOLD_FOR_TABS, HOLD_FOR_TABS, HOLD_FOR_TABS, HOLD_FOR_TABS, HOLD_FOR_TABS,
     TAP_THE_NAME, TAP_THE_NAME, TAP_THE_NAME, TAP_THE_NAME, TAP_THE_NAME,
 };
-/*
- * Where the recap rows sit, for the tap target. The block is centred in its fixed area and its line
- * count follows the recap, which this does not get, so the target is the whole area in four equal rows.
- */
-_Static_assert(HT_CHARACTER_RECAP_ROWS == RECAP_LINES, "one row per recap line");
-int ht_focus_recap_rows(const ht_character_face_t *f, ht_rect_t *out)
-{
-    (void)f;
-    for (int i = 0; i < RECAP_LINES; i++)
-        out[i] = (ht_rect_t){RECAP_X, RECAP_AREA_Y + i * RECAP_AREA_H / RECAP_LINES, RECAP_W,
-                             RECAP_AREA_H / RECAP_LINES};
-    return RECAP_LINES;
-}
 static struct {
     bool showing;           // the last home face drawn was a resting one
     char who[64];           // ... for this recipient
@@ -645,6 +632,35 @@ static void recap_cut(char *out, size_t cap, const char *recap, const ht_font_t 
     if (clipped) strcat(out, "\xe2\x80\xa6");
 }
 
+/*
+ * The recap block as the face sets it: `body` laid out, its line count, and the y of its first line.
+ * One function for the face and for its tap targets, so they cannot drift apart.
+ */
+static int recap_block(ht_lv_label_t *body, const char *recap, int *body_y)
+{
+    const ht_font_t *rf = &ht_lv_inter_30.base;
+    char cut[HT_TEXT_BYTES];
+    recap_cut(cut, sizeof cut, recap, rf, RECAP_W);
+    int n = ht_lv_label(body, rf, cut, RECAP_W, RECAP_LINES, false);
+    if (n > RECAP_LINES) n = RECAP_LINES;
+    // Centred in its fixed area, its first baseline RECAP_BASELINE under the block's top.
+    *body_y = RECAP_AREA_Y + (RECAP_AREA_H - n * RECAP_PITCH) / 2 + RECAP_BASELINE - ht_pfont(rf)->ascent;
+    return n;
+}
+_Static_assert(HT_CHARACTER_RECAP_ROWS >= RECAP_LINES, "a row for every recap line");
+int ht_focus_recap_rows(const ht_character_face_t *f, const char *recap, ht_rect_t *out)
+{
+    (void)f;
+    if (!recap || !*recap) return 0;
+    ht_lv_label_t body;
+    int y, n = recap_block(&body, recap, &y);
+    // Each line's full column and pitch, so the rows meet: a tap between two lines is still the text.
+    for (int i = 0; i < n; i++)
+        out[i] = (ht_rect_t){RECAP_X, y + i * RECAP_PITCH - (RECAP_PITCH - ht_lv_inter_30.base.height) / 2,
+                             RECAP_W, RECAP_PITCH};
+    return n;
+}
+
 void ht_focus_face(ht_scene_t *s, const ht_character_face_t *f, uint8_t frame, uint16_t ink,
                    const char *recap)
 {
@@ -666,13 +682,9 @@ void ht_focus_face(ht_scene_t *s, const ht_character_face_t *f, uint8_t frame, u
 
     // The body, laid out first.
     ht_lv_label_t body;
-    int recap_h = 0;
+    int recap_y = 0;
     if (has_recap) {
-        char cut[HT_TEXT_BYTES];
-        recap_cut(cut, sizeof cut, recap, rf, RECAP_W);
-        int n = ht_lv_label(&body, rf, cut, RECAP_W, RECAP_LINES, false);
-        if (n > RECAP_LINES) n = RECAP_LINES;
-        recap_h = n * RECAP_PITCH;
+        recap_block(&body, recap, &recap_y);
     } else if (status[0]) {
         ht_lv_label(&body, sf, status, COL_W, 1, true);
     } else {
@@ -681,8 +693,7 @@ void ht_focus_face(ht_scene_t *s, const ht_character_face_t *f, uint8_t frame, u
     // A recap's block is centred in its fixed area, its first baseline RECAP_BASELINE under the block's
     // top; a line without a recap is centred on the glass. The mark halfway between the name and the
     // area's top or the line: the gap above it equals the gap below, whatever the recap's length.
-    int body_y = has_recap ? RECAP_AREA_Y + (RECAP_AREA_H - recap_h) / 2 + RECAP_BASELINE - ht_pfont(rf)->ascent
-                           : HT_HEIGHT / 2 - sf->height / 2;
+    int body_y = has_recap ? recap_y : HT_HEIGHT / 2 - sf->height / 2;
     int below = has_recap ? RECAP_AREA_Y : body_y;
     int mark_top = TITLE_BOTTOM + (below - TITLE_BOTTOM - MARK_SIZE) / 2;
 

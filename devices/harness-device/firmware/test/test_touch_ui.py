@@ -17,6 +17,11 @@ def function(name):
         body = body.replace('{', "{\n    if (label[0] == '[') assert(ht_can_display(label, UI_FONT, w, 1));", 1)
     return body + '\n'
 
+# BOOT reads the reader like any non-home view: the abort and stop-turn cases come first and everything
+# else, READER included, goes home, where the agent's face is. Nothing about it is special-cased.
+boot = re.search(r'^void ui_boot_pressed\(void\)\n\{.*?^\}', source, re.M | re.S).group(0)
+assert re.search(r'\} else\n        view\(HOME\);', boot) and 'READER' not in boot
+
 code = r'''
 #include "runtime.h"
 #include "../../cable_features.h"
@@ -32,6 +37,7 @@ code = r'''
 #include "focus.h"
 #include "focus_faces.h"
 #include "pets.h"
+#include "history.h"
 #include "workspace.h"
 #include "command_face.h"
 #include "arc_geometry.inc"
@@ -44,12 +50,12 @@ code = r'''
 # Keep real protocol capacities: a larger fake buffer can hide target truncation.
 code += defines('CABLE_READ_TOKEN_MAX','ID_MAX','CABLE_NAME_MAX','SWARM_ID_MAX','SWARMS_MAX','CABLE_MAX_AGENTS','MAX_PROJECTS')
 code += defines('NOTICES','QUESTION_MAX','OPTION_MAX','PANE_MEMORY_MAX','UI_FONT','Q_ROWS','DRAFT_ROWS',source=source)
-code += defines('FACE_CX', 'PANE_PITCH', 'PANE_ROWS', source=source)
+code += defines('FACE_CX', 'PANE_PITCH', 'PANE_ROWS', 'READER_ROWS', 'READER_STEP', 'READER_Y', 'READER_W', 'READER_FONT', 'HISTORY_BYTES', source=source)
 if '#define PANE_RESULT_BYTES ' in source:
     code += defines('PANE_RESULT_BYTES', source=source)
 code += face_geometry(source)
 code += source[source.index('typedef enum {'):source.index('static EXT_RAM_BSS_ATTR struct {')]
-code += typedef('cable_swarm_t') + typedef('cable_notif_t')
+code += typedef('cable_swarm_t') + typedef('cable_notif_t') + typedef('reader_t', source)
 code += r'''
 static struct {
     bool ready, connected, loading, voice_open, voice_start_pending, voice_waiting, voice_carry, voice_review, voice_draft_append, voice_review_preview, voice_search;
@@ -77,6 +83,7 @@ static struct {
     question_t q;
     agent_t agents[MAX_PROJECTS]; hit_t hits[24];
     ht_rect_t caption_arc;
+    uint32_t reader_seq;
 } s;
 static ht_gesture_t gesture;
 static ht_character_t character;
@@ -86,6 +93,7 @@ static char celebration_label[64];
 static ht_character_id_t desktop_companion=HT_CHARACTER_COUNT;
 static struct { char name[25]; } desktop_identity;
 static void select_companion(void) {}
+static ht_history_t history;
 static ht_character_caption_t home_caption;
 static ht_character_id_t test_character;
 static unsigned notice_reads_sent; static action_t notice_read_queued;
@@ -202,7 +210,7 @@ static bool scroll_emit(ht_scroll_phase_t phase, int dy, int velocity, void *ctx
 code += function('color')
 code += function('settings_item') + function('settings_count') + function('hit_contains')
 code += function('find')
-for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notice_forget_read', 'notice_flush_reads', 'notice_mark_read', 'habitat_scene_receipt', 'habitat_scene_presented', 'pane_memory', 'pane_memory_apply', 'dismiss_result', 'activity_text', 'ensure', 'input_cancel', 'view', 'notice_open', 'workspace_index', 'tabs_open', 'workspace_failed', 'tab_request', 'tabs_sync', 'ui_scroll_reportable', 'focus_skin', 'focus_face_for', 'focus_chord', 'focus_put', 'focus_span', 'focus_take', 'focus_rows', 'ui_rows', 'ui_can_display', 'ui_wrap', 'text_in', 'control', 'home_footer', 'footer_control', 'text', 'center', 'render_brand', 'heading', 'question_view', 'question_rows', 'question_move', 'question_text', 'render_question', 'render_choices', 'render_answer_review', 'question_answer', 'send_answer', 'make_action', 'character_mood', 'voice_status', 'home_caption_rotates', 'home_caption_tick', 'status_animated', 'status_speed', 'status_wake_ms', 'surface_tick', 'command_face', 'render_workspace_preview', 'question_prompt', 'focus_bell', 'render_home', 'render_voice', 'render_selection', 'render_form', 'draft_move', 'render_draft', 'render_draft_options', 'ui_swarms_replace', 'ui_workspace_applied', 'ui_land_after_reload']:
+for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notice_forget_read', 'notice_flush_reads', 'notice_mark_read', 'habitat_scene_receipt', 'habitat_scene_presented', 'pane_memory', 'pane_memory_apply', 'dismiss_result', 'activity_text', 'ensure', 'input_cancel', 'view', 'notice_open', 'workspace_index', 'tabs_open', 'workspace_failed', 'tab_request', 'tabs_sync', 'ui_scroll_reportable', 'focus_skin', 'focus_face_for', 'focus_chord', 'focus_put', 'focus_span', 'focus_take', 'focus_rows', 'ui_rows', 'ui_can_display', 'ui_wrap', 'text_in', 'control', 'home_footer', 'footer_control', 'text', 'center', 'render_brand', 'heading', 'question_view', 'question_rows', 'question_move', 'question_text', 'render_question', 'render_choices', 'render_answer_review', 'question_answer', 'send_answer', 'make_action', 'character_mood', 'voice_status', 'home_caption_rotates', 'home_caption_tick', 'status_animated', 'status_speed', 'status_wake_ms', 'hold_opens_tabs', 'surface_tick', 'command_face', 'render_workspace_preview', 'reader_current', 'reader_last', 'reader_step', 'reader_move', 'reader_page', 'reader_title', 'reader_control', 'render_reader', 'question_prompt', 'focus_bell', 'render_home', 'render_voice', 'render_selection', 'render_form', 'draft_move', 'render_draft', 'render_draft_options', 'ui_swarms_replace', 'ui_workspace_applied', 'ui_land_after_reload']:
     code += function(name)
 code += function('render_settings') + function('ui_visit_state')
 code += function('ui_project_known') + function('ui_focus_project') + function('ui_apply_pending_focus')
@@ -211,6 +219,8 @@ for name in ['notice_remove', 'notice_sync_view', 'notice_selection', 'notice_re
     code += function(name)
 for name in ['event', 'ui_project_emit', 'ui_project_restore_event', 'ui_project_clear_event', 'ui_project_set_name', 'ui_project_remove', 'ui_project_clear_all', 'ui_project_apply_order']:
     code += function(name)
+reader_actions=source.split('    case A_READER:',1)[1].split('    case A_QUESTION:',1)[0]
+code+='static void reader_action(action_t a) { switch(a.kind) { case A_READER:'+reader_actions+'default: break; } }\n'
 visit_actions=source.split('    case A_LATEST:',1)[1].split('    case A_TABS:',1)[0]
 code+='static void visit_action(action_t a) { switch(a.kind) { case A_LATEST:'+visit_actions+'default: break; } }\n'
 notice_actions=source.split('    case A_NOTICE:',1)[1].split('    case A_LATEST:',1)[0]
@@ -260,6 +270,7 @@ static void dispatch(action_t a) {
     else if (a.kind == A_HOME) view(HOME);
     else if (a.kind == A_NOTICE) notice_action(a);
     else if (a.kind == A_RECAP_DISMISS) dismiss_result(a.id);
+    else if (a.kind == A_READER || a.kind == A_READER_OLDER || a.kind == A_READER_NEWER) reader_action(a);
     else if (a.kind == A_DESKTOP) desktop_action(a);
     else if (a.kind == A_UP || a.kind == A_DOWN) page_action(a);
     else if (a.kind == A_TABS || a.kind == A_TAB || a.kind == A_TAB_DONE) workspace_action(a);
@@ -283,10 +294,13 @@ static void scene_take(void) {
     else if (s.view == VOICE) render_voice(&scene);
     else if (s.view == TABS || s.view == INBOX || s.view == MACHINES) render_list(&scene);
     else if (s.view == AGENTS) render_agents(&scene);
+    else if (s.view == READER) render_reader(&scene);
     else if (s.view == SELECTION) render_selection(&scene); else render_home(&scene);
     if (s.view == SETTINGS) { ht_scene_clear(&scene,BG); s.hit_count=0; render_settings(&scene); }
     if (present_scene) habitat_scene_presented(habitat_scene_receipt());
 }
+static bool history_fail;
+static void *history_alloc(size_t n) { static char *block; free(block); block = history_fail ? NULL : malloc(n); return block; }
 static void reset(void) {
     host_features=31; fake_ms=0; fake_asleep=false; present_scene=true;
     memset(&visit,0,sizeof visit); visit_sends=visit_wire=returns=0; question_pending=false;
@@ -295,6 +309,7 @@ static void reset(void) {
     memset(&selection,0,sizeof(selection)); selections=0;
     memset(&carry,0,sizeof(carry)); carry_prepares=carry_drops=0; voice_context[0]=0;
     ht_draft_reset(&draft); draft_actions=reviews=0; ht_form_reset(&form); form_actions=0;
+    ht_history_init(&history,HISTORY_BYTES,history_alloc);
     memset(&home_caption,0,sizeof home_caption); memset(&character,0,sizeof character); ht_character_select(&character,test_character); memset(&s, 0, sizeof(s)); memset(&gesture, 0, sizeof(gesture)); memset(&scroll, 0, sizeof(scroll));
     s.ready = s.connected = true; s.count = 2; s.active = 0; s.view = HOME; s.pressed = -1;
     s.brightness = preview_brightness;
@@ -539,7 +554,8 @@ static bool result_visible(void) {
         }
     }
     assert(recipient_above);
-    tap(61000,233,310); // The same central tap starts voice over a summary.
+    // A tap on the octopus starts voice over a summary; a tap on the summary text opens the reader (below).
+    tap(61000,233,150);
     assert(!desktop_opens && starts==1 && s.view==VOICE && !result_visible());
     scene_take(); portrait(dir,"summary-listening");
     bool large=false;
@@ -975,7 +991,7 @@ static void pane_memory_checks(const char *dir) {
     ui_project_emit("a",NULL,"processing","Coalescing",NULL); scene_take();
     tap(2000,233,41); assert(s.view==AGENTS && !starts); // top caption always picks panes
     reset(); ui_project_emit("a",NULL,"summary","The result is ready.","The result is ready.");
-    scene_take(); tap(3000,233,280); scene_take(); assert(!result_visible() && !desktop_opens && starts==1);
+    scene_take(); tap(3000,233,150); scene_take(); assert(!result_visible() && !desktop_opens && starts==1); // the octopus; the summary text below it opens the reader
     dispatch((action_t){.kind=A_VOICE_ABORT}); scene_take(); assert(result_visible());
     ui_project_remove("a"); ui_project_set_name("a","Return to pane"); s.active=find("a");
     ui_project_restore_event("a","summary","The result is ready.","The result is ready.");
@@ -1181,6 +1197,263 @@ static void tab_frame_checks(void) {
     puts("tab frames: long/UTF-8 names, bounds, clipped movement and exact partial redraw PASS");
     reset();
 }
+
+static action_kind_t resolve_at(int x, int y) {
+    bool surface = s.view==HOME || s.view==AGENT;
+    for (int i=0;i<s.hit_count;i++)
+        if (s.hits[i].enabled && hit_contains(&s.hits[i],x,y,surface)) return s.hits[i].action;
+    return A_NONE;
+}
+static bool point_in_circle(int x, int y) { return (x-233)*(x-233)+(y-233)*(y-233) <= 233*233; }
+static bool rect_in_circle(ht_rect_t r) {
+    return point_in_circle(r.x,r.y) && point_in_circle(r.x+r.w,r.y) &&
+           point_in_circle(r.x,r.y+r.h) && point_in_circle(r.x+r.w,r.y+r.h);
+}
+static bool rects_meet(ht_rect_t a, ht_rect_t b) {
+    return a.x<b.x+b.w && b.x<a.x+a.w && a.y<b.y+b.h && b.y<a.y+a.h;
+}
+static ht_rect_t run_box(const ht_run_t *r) { return (ht_rect_t){r->x,r->y,r->w,r->font->height}; }
+/*
+ * WHAT A TAP ON THE HOME FACE MEANS, through the production hit list, for every skin.
+ *
+ * Text is read, the character talks. With a recap showing, each row of it is a reader target registered
+ * ahead of the character's. On the creature skins the character's target is only what is above them; on
+ * Focus it stays the whole face below the name (upstream: a touch anywhere talks) and the rows win by
+ * order. With nothing to read the whole face is the character, as before. The rows stay inside the face.
+ */
+static void target_checks(void) {
+    static const ht_character_id_t skins[] = {HT_CHARACTER_TIM, HT_CHARACTER_TUX, HT_CHARACTER_FOCUS};
+    const char *recap = "The build finished cleanly and all forty tests passed, including the new touch target checks, so it is ready to review whenever you like, nothing else.";
+    const char *longname = "A very long pane name for the arc"; // 33 of the 39 bytes a name holds
+    for (unsigned k=0;k<3;k++) {
+        ht_character_id_t skin = skins[k];
+        // (b) nothing to read: the whole face is still the character.
+        reset(); assert(ht_character_select(&character,skin)); strcpy(s.agents[0].name,longname); scene_take();
+        int readers=0; for (int i=0;i<s.hit_count;i++) readers += s.hits[i].action==A_READER;
+        assert(!readers);
+        for (int y=66;y<382;y+=6) for (int x=33;x<433;x+=6) if (point_in_circle(x,y)) {
+            action_kind_t a = resolve_at(x,y);
+            assert(a==A_PET || a==A_AGENTS || a==A_VOICE || a==A_INBOX);
+        }
+        assert(resolve_at(233,150)==A_PET && resolve_at(233,220)==A_PET && resolve_at(233,300)==A_PET && resolve_at(120,250)==A_PET);
+        tap(1000,233,300); assert(starts==1 && s.view==VOICE);
+
+        // (a) a recap on screen.
+        reset(); assert(ht_character_select(&character,skin)); strcpy(s.agents[0].name,longname);
+        ui_project_emit("a","session-a","summary","Full text of the result.",recap);
+        ui_notify_task_done("b","Other pane","M2","The checks passed."); // the bell and its target
+        scene_take();
+        ht_rect_t rows[HT_CHARACTER_RECAP_ROWS+2]; int n=0;
+        for (int i=0;i<s.hit_count;i++) if (s.hits[i].action==A_READER) { assert(n<HT_CHARACTER_RECAP_ROWS); rows[n++]=s.hits[i].rect; }
+        // Focus reports the lines it set (this recap takes several); the creature skins their four fixed rows.
+        assert(skin==HT_CHARACTER_FOCUS ? n>=2 && n<=HT_CHARACTER_RECAP_ROWS : n==HT_CHARACTER_RECAP_ROWS);
+        for (int i=0;i<n;i++) {
+            assert(rect_in_circle(rows[i]));
+            // Every point of every row is the reader, so nothing earlier in the list (the caption arc,
+            // the bell) overlaps it and nothing later (the character) can claim it.
+            for (int y=rows[i].y;y<rows[i].y+rows[i].h;y+=2) for (int x=rows[i].x;x<rows[i].x+rows[i].w;x+=2)
+                assert(resolve_at(x,y)==A_READER);
+        }
+        for (int i=0;i<s.hit_count;i++) {
+            const hit_t *h=&s.hits[i];
+            if (h->action==A_PET && skin!=HT_CHARACTER_FOCUS) {
+                assert(rect_in_circle(h->rect));
+                assert(h->rect.y+h->rect.h<=rows[0].y);
+            }
+            if ((h->action==A_PET && skin!=HT_CHARACTER_FOCUS) || h->action==A_VOICE || h->action==A_INBOX ||
+                h->action==A_AGENTS)
+                for (int r=0;r<n;r++) assert(!rects_meet(h->rect,rows[r]));
+        }
+        // Sweep the face: nothing that starts voice lies in a recap row.
+        for (int y=0;y<466;y+=3) for (int x=0;x<466;x+=3) {
+            action_kind_t a=resolve_at(x,y);
+            for (int r=0;r<n;r++) if (x>=rows[r].x && x<rows[r].x+rows[r].w && y>=rows[r].y && y<rows[r].y+rows[r].h)
+                assert(a==A_READER);
+        }
+        // The rows are derived from what was drawn: every recap glyph run lies inside one of them.
+        int seen=0;
+        for (int i=0;i<scene.count;i++) {
+            const ht_run_t *r=&scene.runs[i];
+            // Focus sets its recap in Inter (focus_faces.c), the creature skins in mono 28.
+            if ((skin!=HT_CHARACTER_FOCUS && r->font!=&ht_mono_28) || r->arc || !r->text[0] || r->y<170 ||
+                r->y>=390) continue;
+            ht_rect_t b=run_box(r); seen++;
+            assert(resolve_at(b.x,b.y)==A_READER && resolve_at(b.x+b.w-1,b.y)==A_READER &&
+                   resolve_at(b.x,b.y+b.h-1)==A_READER && resolve_at(b.x+b.w-1,b.y+b.h-1)==A_READER &&
+                   resolve_at(b.x+b.w/2,b.y+b.h/2)==A_READER);
+        }
+        // Focus's recap block takes as many lines as the text needs, and a row for each.
+        assert(skin==HT_CHARACTER_FOCUS ? seen==n : seen==HT_CHARACTER_RECAP_ROWS);
+        // The character still speaks; the artwork is the octopus/penguin, the name row is Focus's.
+        if (skin==HT_CHARACTER_FOCUS) {
+            // No microphone on Focus since upstream's 2026-10-01 face: the bell is at the bottom.
+            assert(resolve_at(233,137)==A_PET && resolve_at(233,410)==A_INBOX);
+        } else {
+            int art=0;
+            for (int i=0;i<scene.count;i++) if (scene.runs[i].font->height==4 && scene.runs[i].text[0]!=0) {
+                ht_rect_t b=run_box(&scene.runs[i]); art++;
+                assert(resolve_at(b.x+b.w/2,b.y)==A_PET && resolve_at(b.x+b.w/2,b.y+b.h-1)==A_PET);
+                assert(b.y+b.h<=rows[0].y);
+            }
+            assert(art>10);
+            assert(resolve_at(233,130)==A_PET);
+        }
+        // Real contacts.
+        ht_rect_t mid=rows[1];
+        tap(2000,mid.x+mid.w/2,mid.y+mid.h/2);
+        assert(s.view==READER && !starts && !recording);
+        reset(); assert(ht_character_select(&character,skin));
+        ui_project_emit("a","session-a","summary","Full text of the result.",recap); scene_take();
+        habitat_touch(true,233,rows[2].y+10,3000); habitat_touch(false,233,rows[2].y+10,3800); // a lingering press
+        // On Focus a hold is the tabs wherever it lands (Jay, 2026-10-04); elsewhere it still reads.
+        assert((skin==HT_CHARACTER_FOCUS ? s.view==TABS : s.view==READER) && !starts);
+        reset(); assert(ht_character_select(&character,skin));
+        ui_project_emit("a","session-a","summary","Full text of the result.",recap); scene_take();
+        tap(4000,233,130); assert(starts==1 && s.view==VOICE && !strcmp(target,"a"));
+        // Hold on the character still opens the tab switcher's path (a hold is not a tap).
+        reset(); assert(ht_character_select(&character,skin));
+        ui_project_emit("a","session-a","summary","Full text of the result.",recap); scene_take();
+        habitat_touch(true,233,130,5000); habitat_touch(false,233,130,5800);
+        assert(!starts && s.view!=READER);
+        // A recap that is not showing is not a target: busy, offline and loading all restore the face.
+        reset(); assert(ht_character_select(&character,skin));
+        ui_project_emit("a","session-a","summary","Full text of the result.",recap);
+        ui_project_emit("a","session-a","processing",NULL,NULL); scene_take();
+        readers=0; for (int i=0;i<s.hit_count;i++) readers += s.hits[i].action==A_READER;
+        assert(!readers && resolve_at(233,300)==A_PET);
+    }
+    reset();
+    puts("home targets: recap rows open the reader, the character starts voice, no recap leaves the whole face as voice; every skin, inside the bezel, clear of caption and bell PASS");
+}
+static bool scene_has(const char *needle) {
+    for (int i=0;i<scene.count;i++) if (strstr(scene.runs[i].text,needle)) return true;
+    return false;
+}
+static const char *last_row(void) {
+    const char *last="";
+    for (int i=0;i<scene.count;i++) {
+        const ht_run_t *r=&scene.runs[i];
+        if (r->font==READER_FONT && r->y>=READER_Y && r->y<READER_Y+READER_ROWS*28 && r->text[0]) last=r->text;
+    }
+    return last;
+}
+static void swipe(uint32_t t, int x0, int x1, int y) {
+    habitat_touch(true,x0,y,t); habitat_touch(true,(x0+x1)/2,y,t+30); habitat_touch(true,x1,y,t+60);
+    habitat_touch(false,x1,y,t+90); scene_take();
+}
+static void reader_checks(void) {
+    static char big[8600];
+    size_t n=0;
+    for (int i=0; n<8000; i++) n+=(size_t)snprintf(big+n,sizeof big-n,"row%03d lorem ipsum dolor sit amet consectetur\n",i);
+    snprintf(big+n,sizeof big-n,"END-OF-TEXT");
+    assert(strlen(big)>8000 && strlen(big)<8192);
+
+    reset();
+    ui_project_emit("a","session-a","summary",big,"Short recap"); scene_take();
+    assert(strlen(s.agents[0].full)==PANE_RESULT_BYTES-1);   // the pane copy stays cut
+    tap(1000,233,285); assert(s.view==READER && !starts);   // empty space under a one line recap is still the recap
+    scene_take();
+    ht_history_entry_t e; assert(ht_history_get(&history,"a",0,&e) && e.text_len==strlen(big) && !strcmp(e.text,big));
+    // Chrome: heading with the name and position, nine rows, three controls; everything inside the bezel.
+    const ht_run_t *head=NULL; int rows_seen=0;
+    for (int i=0;i<scene.count;i++) {
+        const ht_run_t *r=&scene.runs[i];
+        if (r->y==64 && r->font==READER_FONT) head=r;
+        if (r->font==READER_FONT && r->y>=READER_Y && r->y<READER_Y+READER_ROWS*28) rows_seen++;
+        if (r->text[0]) assert(rect_in_circle(run_box(r)));
+        assert(r->arc==0);
+    }
+    assert(head && !strncmp(head->text,"Deploy",6) && strstr(head->text," 1/1") && strlen(head->text)<=24);
+    assert(rows_seen==READER_ROWS);
+    for (int i=0;i<s.hit_count;i++) {
+        assert(s.hits[i].action!=A_PET && s.hits[i].action!=A_VOICE && s.hits[i].action!=A_READER);
+        assert(rect_in_circle(s.hits[i].rect));
+    }
+    assert(action_enabled(A_HOME) && !action_enabled(A_READER_OLDER) && !action_enabled(A_READER_NEWER));
+    assert(scene_has("row000") && !scene_has("END-OF-TEXT"));
+
+    // A tap or a hold on the glass body never records.
+    tap(2000,233,220); assert(s.view==READER && !starts);
+    habitat_touch(true,233,220,3000); habitat_touch(false,233,220,3800); scene_take(); assert(s.view==READER && !starts);
+
+    // A_DOWN pages to the true end and stops; the last line is reachable.
+    int steps=0;
+    for (;;) {
+        int before=s.offset; dispatch((action_t){.kind=A_DOWN}); scene_take();
+        if (s.offset==before) break;
+        assert(s.offset==before+READER_STEP || s.offset==reader_last(big));
+        assert(++steps<400);
+    }
+    assert(s.offset==reader_last(big) && steps>20);
+    assert(!strcmp(last_row(),"END-OF-TEXT"));
+    dispatch((action_t){.kind=A_UP}); scene_take(); assert(s.offset==reader_last(big)-READER_STEP && !scene_has("END-OF-TEXT"));
+
+    // Dragging follows the finger a row at a time and also stops at the end. None of it is relayed to
+    // the desktop terminal as scroll.
+    int relayed=down_reports+moves+ups;
+    s.offset=0; uint32_t t=10000; int prev=0;
+    for (int stroke=0; stroke<400 && s.offset<reader_last(big); stroke++) {
+        habitat_touch(true,233,340,t);
+        for (int i=1;i<=12;i++) habitat_touch(true,233,340-i*25,t+i*16);
+        habitat_touch(false,233,40,t+220); scene_take(); t+=1000;
+        assert(s.offset>=prev && s.view==READER); prev=s.offset;
+    }
+    assert(s.offset==reader_last(big) && !strcmp(last_row(),"END-OF-TEXT"));
+    habitat_touch(true,233,340,t); for (int i=1;i<=12;i++) habitat_touch(true,233,340-i*25,t+i*16);
+    habitat_touch(false,233,40,t+220); scene_take(); assert(s.offset==reader_last(big)); t+=1000;
+    habitat_touch(true,233,60,t); for (int i=1;i<=12;i++) habitat_touch(true,233,60+i*25,t+i*16);
+    habitat_touch(false,233,360,t+220); scene_take(); assert(s.offset<reader_last(big) && s.view==READER); t+=1000;
+
+    assert(down_reports+moves+ups==relayed);
+    // History: newest first, older on swipe right and [<], newer on swipe left and [>].
+    dispatch((action_t){.kind=A_HOME}); scene_take();
+    ui_project_emit("a","session-a","summary","The second result.","Second recap."); scene_take();
+    assert(ht_history_count(&history,"a")==2);
+    tap(t+=1000,233,285); scene_take(); assert(s.view==READER);
+    assert(scene_has("The second result.") && scene_has(" 2/2") && !action_enabled(A_READER_NEWER) && action_enabled(A_READER_OLDER));
+    swipe(t+=1000,100,250,300); assert(scene_has("row000") && scene_has(" 1/2") && !action_enabled(A_READER_OLDER) && action_enabled(A_READER_NEWER));
+    swipe(t+=1000,100,250,300); assert(scene_has(" 1/2") && s.view==READER);   // no older than the oldest
+    swipe(t+=1000,250,100,300); assert(scene_has("The second result.") && scene_has(" 2/2"));
+    swipe(t+=1000,250,100,300); assert(scene_has(" 2/2") && s.view==READER);
+    tap(t+=1000,134,382); assert(scene_has(" 1/2"));      // [<]
+    // A result arriving while an older one is on screen does not move the page.
+    ui_project_emit("a","session-a","summary","The third result.","Third recap."); scene_take();
+    assert(ht_history_count(&history,"a")==3 && scene_has(" 1/3") && scene_has("row000"));
+    tap(t+=1000,332,382); assert(scene_has("The second result.") && scene_has(" 2/3"));   // [>]
+    tap(t+=1000,332,382); assert(scene_has("The third result.") && scene_has(" 3/3"));
+    // Replays never duplicate; a live repeat of the newest does not either, a live repeat of an older one is new.
+    ui_project_restore_event("a","summary",big,"Short recap");
+    ui_project_restore_event("a","summary","The second result.","Second recap.");
+    ui_project_restore_event("a","summary","The third result.","Third recap.");
+    ui_project_emit("a","session-a","summary","The third result.","Third recap.");
+    assert(ht_history_count(&history,"a")==3);
+    ui_project_emit("a","session-a","summary","The second result.","Second recap.");
+    assert(ht_history_count(&history,"a")==4);
+    // Other agents keep their own.
+    ui_project_emit("b","session-b","summary","B's only result.","B recap.");
+    assert(ht_history_count(&history,"b")==1 && ht_history_count(&history,"a")==4);
+    // Back returns to the agent's face.
+    tap(t+=1000,233,382); scene_take();
+    assert(s.view==HOME && s.active==0 && scene_has("Deploy latest firmware") && !starts);
+
+    // The reader is reached and left from the face with BOOT's own path: any non-home view goes home.
+    dispatch((action_t){.kind=A_READER}); assert(s.view==READER); view(HOME); scene_take();
+    assert(s.view==HOME && scene_has("Deploy latest firmware"));
+
+    // No PSRAM: the history disables itself and the reader shows the pane's copy of the latest result.
+    history_fail=true; reset(); history_fail=false;
+    assert(!ht_history_enabled(&history));
+    ui_project_emit("a","session-a","summary",big,"Short recap"); scene_take();
+    tap(1000,233,285); scene_take(); assert(s.view==READER);
+    head=NULL; for (int i=0;i<scene.count;i++) if (scene.runs[i].y==64) head=&scene.runs[i];
+    assert(head && !strchr(head->text,'/') && scene_has("row000"));
+    assert(!action_enabled(A_READER_OLDER) && !action_enabled(A_READER_NEWER));
+    swipe(2000,100,250,300); assert(s.view==READER && scene_has("row000"));
+    for (int i=0;i<40;i++) dispatch((action_t){.kind=A_DOWN});
+    scene_take(); assert(s.offset==reader_last(s.agents[0].full) && !scene_has("END-OF-TEXT") && s.offset>0);
+    reset();
+    puts("reader: full text from PSRAM history, older/newer by swipe and control, position in the heading, stops at the last line, replays deduplicated, no-PSRAM fallback, glass never records PASS");
+}
 int main(int argc, char **argv) {
     test_character = getenv("HABITAT_TEST_TUX") ? HT_CHARACTER_TUX : HT_CHARACTER_TIM;
     notification_read_checks(argc>1 ? argv[1] : NULL);
@@ -1221,6 +1494,8 @@ int main(int argc, char **argv) {
     }
     const char *dir = argc > 1 ? argv[1] : NULL;
     recap_checks(dir);
+    target_checks();
+    reader_checks();
     notice_checks(dir);
     pane_memory_checks(dir);
     pane_notification_soak();
@@ -1862,10 +2137,14 @@ int main(int argc, char **argv) {
     habitat_touch(true, 233, 300, 2000); habitat_touch(true, 233, 300, 2700);
     assert(s.view == TABS && !starts);
     habitat_touch(false, 233, 300, 2800); assert(s.view == TABS && !starts);
-    // A tap ANYWHERE on the face below the name talks (owner, 2026-10-01): the recap, the mark, the
-    // empty glass around them, and the bottom edge where the microphone used to be.
+    // A tap ANYWHERE on the face below the name talks (owner, 2026-10-01): the mark, the empty glass
+    // around the recap, and the bottom edge where the microphone used to be. The recap's own text is
+    // the exception on this fork (Jay, 2026-10-04): a tap there opens the reader and never records.
+    workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
+    ui_project_emit(s.agents[0].id, "sess", "summary", "Retry queue shipped.", "Retry queue shipped.");
+    scene_take(); tap(1000, 233, 275); assert(s.view == READER && !starts);
     {
-        const int at[][2] = {{233, 110}, {233, 260}, {120, 300}, {346, 200}, {233, 360}, {233, 410}, {233, 440}};
+        const int at[][2] = {{233, 110}, {120, 320}, {346, 200}, {233, 360}, {233, 410}, {233, 440}};
         for (unsigned k = 0; k < sizeof at / sizeof at[0]; k++) {
             workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
             ui_project_emit(s.agents[0].id, "sess", "summary", "Retry queue shipped.", "Retry queue shipped.");
@@ -1885,9 +2164,9 @@ int main(int argc, char **argv) {
         workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
         ui_project_emit(s.agents[0].id, "sess", "summary", "Retry queue shipped.", "Retry queue shipped.");
         scene_take();
-        habitat_touch(true, 233, 260, 1000);
-        habitat_touch(true, 233 + drift / 2, 260 + drift, 1000 + held / 2);
-        habitat_touch(false, 233 + drift / 2, 260 + drift, 1000 + held);
+        habitat_touch(true, 233, 330, 1000);   // under the one-line recap, clear of its text
+        habitat_touch(true, 233 + drift / 2, 330 + drift, 1000 + held / 2);
+        habitat_touch(false, 233 + drift / 2, 330 + drift, 1000 + held);
         assert(starts == 1 && s.view == VOICE && !strcmp(target, s.agents[0].id));
     }
     workspace_setup(); ht_character_select(&character, HT_CHARACTER_FOCUS); scene_take();
@@ -2526,7 +2805,7 @@ with tempfile.TemporaryDirectory(prefix='harness-touch-ui-') as d:
     (out / 'touch_ui.c').write_text(code)
     subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-O1','-g',
                     '-fsanitize='+os.environ.get('SANITIZERS','undefined,bounds'),
-                    *extra_includes, '-I',str(native),str(out/'touch_ui.c'), *extra_sources, str(native/'gestures.c'),
+                    *extra_includes, '-I',str(native),str(out/'touch_ui.c'), *extra_sources, str(native/'gestures.c'),str(native/'history.c'),
                     str(native/'form.c'),str(native/'visit.c'),str(native/'draft.c'), str(native/'scroll.c'),str(native/'selection.c'),str(native/'carry.c'),str(native/'tim.c'),str(native/'character_motion.c'),str(native/'character_layout.c'),str(native/'character.c'),str(native/'illustrated.c'),str(native/'tux.c'),str(native/'focus.c'),str(native/'lvgl_fonts.c'),str(native/'lvgl_icons.c'),str(native/'focus_marks.c'),str(native/'focus_faces.c'),str(native/'pets.c'),str(native/'terminal.c'),
                     str(native/'fonts.c'),str(native/'octopus.c'),str(native/'ascii_clip.c'),str(native/'octopus_font.c'),str(native/'workspace.c'),str(native/'command_face.c'),'-o',str(out/'touch_ui')],check=True)
     args=[str(out/'touch_ui')]

@@ -209,8 +209,9 @@ static void recipient(ht_scene_t *s, const ht_character_face_t *f, int y)
 static const int roomy_widths[] = {408, 408, 391, 340};
 _Static_assert(sizeof roomy_widths / sizeof roomy_widths[0] == HT_CHARACTER_RECAP_ROWS, "recap rows");
 
-int ht_character_layout_recap_rows(const ht_character_face_t *f, ht_rect_t *out)
+int ht_character_layout_recap_rows(const ht_character_face_t *f, const char *recap, ht_rect_t *out)
 {
+    (void)recap;
     // Only the live reading surface is a tap target; the benchmark geometries never were.
     if (!f->roomy_reading) return 0;
     for (int row = 0; row < HT_CHARACTER_RECAP_ROWS; row++)

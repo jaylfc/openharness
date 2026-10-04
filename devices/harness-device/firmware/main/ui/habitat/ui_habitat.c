@@ -13,6 +13,7 @@
 #include "focus.h"
 #include "perf_bench.h"
 #include "command_face.h"
+#include "history.h"
 #include "theme.h"
 #include "focus_faces.h"
 #ifdef DEVICE_CREATURE_GALLERY
@@ -26,6 +27,7 @@ static ht_gallery_t gallery;
 #include "config_store.h"
 #include "cable_client.h"
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_app_desc.h"
@@ -70,6 +72,18 @@ static ht_gallery_t gallery;
 #define SET_TEXT_W 300
 #define PANE_MEMORY_MAX 128
 #define PANE_RESULT_BYTES 1024
+/*
+ * THE READER. Nine rows of ht_mono_20 in a 29 cell column: 12 px cells, 28 px rows. One column for every
+ * row, sized for the narrowest (the top one, y=96) so the text never rewraps as it scrolls; from
+ * x=59 to 407 and y=96 to 348 every corner is inside the bezel. Bottom controls sit below at 352.
+ */
+#define READER_ROWS 9
+#define READER_STEP 6
+#define READER_Y 96
+#define READER_W 348
+#define READER_FONT (&ht_mono_20)
+// The history ring lives in PSRAM: this many bytes, allocated once. Its struct is all internal RAM.
+#define HISTORY_BYTES (512 * 1024)
 typedef enum {
     HOME,
     AGENTS,
@@ -122,6 +136,7 @@ typedef enum {
     A_MODEL,
     A_RECAP_DISMISS,
     A_DESKTOP,
+    A_READER_OLDER, A_READER_NEWER,
     A_UP,
     A_DOWN,
     A_SCROLL,
@@ -243,6 +258,7 @@ static EXT_RAM_BSS_ATTR struct {
     uint32_t pet_next_ms;   // when the pet's (or the voice screen's listening scene's) drawn frame next changes (clock_ms), 0 = never
     int start_x, start_y, last_x, last_y;
     uint32_t touch_started;
+    uint32_t reader_seq;   // history entry the reader shows; 0 follows the newest
 } s;
 static QueueHandle_t actions;
 static _Atomic(TaskHandle_t) reload_waiter;
@@ -281,8 +297,18 @@ static void select_companion(void)
         .stage=!strcmp(identity->version,"0.1")?0:!strcmp(identity->version,"1.0")?1:2,
         .colour=identity->colour<0?255:(uint8_t)identity->colour,.mark=identity->mark};
 }
+static ht_history_t history;
 static ht_character_caption_t home_caption;
 static action_t pressed_action;
+/*
+ * A hold opens the tab list from the face. On Focus that includes the recap's rows (Jay, 2026-10-04):
+ * a tap on the text reads it, a hold anywhere is the tabs, as upstream's Focus has it. The creature
+ * skins keep a hold on the recap as "read it".
+ */
+static bool hold_opens_tabs(action_kind_t kind)
+{
+    return kind == A_PET || (kind == A_READER && character.id == HT_CHARACTER_FOCUS);
+}
 static bool queue(action_t a);
 static void view(view_t v);
 static const char *voice_status(void);
@@ -1003,7 +1029,7 @@ static void surface_tick(uint32_t now)
         pressed_action.kind == A_PET && held >= 650 && held <= 1800;
     if (review_preview != s.voice_review_preview) { s.voice_review_preview = review_preview; change(); }
     if (visible && main && s.touch_down && !s.touch_cancelled && gesture.live && !gesture.guarded &&
-        pressed_action.kind == A_PET && !gesture.moved && held >= 650 && held < 5000) {
+        hold_opens_tabs(pressed_action.kind) && !gesture.moved && held >= 650 && held < 5000) {
         // Enter directly. The opening contact is consumed until a real release,
         // so lifting or sliding after the hold cannot also select a tab.
         tabs_open();
@@ -1207,11 +1233,133 @@ static void render_home(ht_scene_t *f)
     }
     // The badge's own target follows it, at the bottom on every skin.
     if (bell) s.hits[s.hit_count++] = (hit_t){{83, bell_y - 18, 300, 84}, A_INBOX, 0, unread > 0};
+    /*
+     * WHAT A TAP ON THE FACE MEANS, when there is a recap on it.
+     *
+     * The recap is text, and a finger on text means "let me read that" — starting a recording from
+     * it is how a second tap ended up finishing and SENDING a clip nobody meant to make. So each row
+     * of the recap is its own target for the reader (hits are searched first match, so these go
+     * before the creature's), and on the creature skins its target shrinks to what is above them. With
+     * nothing to read the whole face is still the creature, as it always was.
+     *
+     * The rows come from the skin that drew them (ht_character_recap_rows), not from numbers copied
+     * here: they follow the same widths, so together they stay inside the bezel.
+     */
+    ht_rect_t rows[HT_CHARACTER_RECAP_ROWS];
+    int recap_rows = recap ? ht_character_recap_rows(&character, &f_, recap, rows) : 0;
+    for (int i = 0; i < recap_rows; i++)
+        s.hits[s.hit_count++] = (hit_t){rows[i], A_READER, 0, true};
     // The bell and the creature never share a target, even when the bell is
     // hidden or its count changes under a finger. Centre always starts voice. On Focus the whole face
-    // below the name does, down to the bottom edge; the bell's target, registered above, wins there.
+    // below the name does, down to the bottom edge; the bell's and the recap's targets, registered
+    // above, win there.
     s.hits[s.hit_count++] = focus_face ? (hit_t){{0, 66, HT_WIDTH, HT_HEIGHT - 66}, A_PET, 0, true}
+                          : recap_rows ? (hit_t){{83, 66, 300, rows[0].y - 66}, A_PET, 0, true}
                                        : (hit_t){{33, 66, 400, 316}, A_PET, 0, true};
+}
+/*
+ * THE READER: the agent's whole result, newest first, with the ones before it a swipe away.
+ *
+ * `history` holds what each summary frame carried (up to 8 KB, PSRAM); the pane cache keeps only the
+ * first 1 KB, so the reader prefers the history and falls back to that when there is none (allocation
+ * failed, or nothing has arrived since boot). s.reader_seq names the entry shown, so a newer result
+ * arriving while an older one is on screen does not slide the page under the reader's eyes.
+ */
+typedef struct {
+    const char *text;
+    unsigned index, count;   // index 0 = newest; count 0 = no history, showing the pane's copy
+} reader_t;
+static reader_t reader_current(const agent_t *a)
+{
+    reader_t r = {.text = ""};
+    if (!a) return r;
+    r.count = ht_history_count(&history, a->id);
+    ht_history_entry_t e;
+    if (r.count) {
+        if (!s.reader_seq || !ht_history_find(&history, a->id, s.reader_seq, &r.index)) r.index = 0;
+        if (ht_history_get(&history, a->id, r.index, &e)) {
+            r.text = e.text[0] ? e.text : e.recap;
+            return r;
+        }
+    }
+    r.index = r.count = 0;
+    r.text = a->full[0] ? a->full : a->preview;
+    return r;
+}
+static int reader_last(const char *text)
+{
+    int rows = ht_text_rows(text, READER_FONT, READER_W);
+    return rows > READER_ROWS ? rows - READER_ROWS : 0;
+}
+static void reader_step(int rows)
+{
+    int next = s.offset + rows, last = reader_last(reader_current(active()).text);
+    s.offset = next < 0 ? 0 : next > last ? last : next;
+    change();
+}
+static void reader_move(int dy)
+{
+    // Follow the finger a row at a time, like the lists; the end is a stop, not a wrap.
+    s.tab_drag += dy;
+    int step = s.tab_drag / READER_FONT->height;
+    if (!step) return;
+    s.tab_drag %= READER_FONT->height;
+    int before = s.offset;
+    reader_step(step);
+    if (s.offset == before) s.tab_drag = 0;   // Overscroll never builds up travel to undo on reversal.
+}
+static void reader_page(bool older)
+{
+    agent_t *a = active();
+    reader_t r = reader_current(a);
+    if (!r.count || (older ? r.index + 1 >= r.count : !r.index)) return;
+    ht_history_entry_t e;
+    unsigned want = older ? r.index + 1 : r.index - 1;
+    if (!ht_history_get(&history, a->id, want, &e)) return;
+    s.reader_seq = want ? e.seq : 0;
+    s.offset = 0;
+    change();
+}
+static void reader_title(char *out, size_t cap, const char *name, unsigned position, unsigned total)
+{
+    // "Name 2/7", cut to the 24 cells the top chord holds. The position is never the part that goes.
+    char tail[16] = "";
+    if (total) snprintf(tail, sizeof tail, " %u/%u", position, total);
+    if (!name) name = "";
+    int room = 24 - (int)strlen(tail), cells = 0;
+    for (const char *q = name; *q; cells++) ht_utf8_next(&q);
+    bool cut = cells > room && room > 3;
+    int keep = cells <= room ? cells : room > 3 ? room - 3 : 0;
+    const char *end = name;
+    for (int i = 0; i < keep && *end; i++) ht_utf8_next(&end);
+    snprintf(out, cap, "%.*s%s%s", (int)(end - name), name, cut ? "..." : "", tail);
+}
+static void reader_control(ht_scene_t *f, int x, int w, const char *label, action_kind_t action, bool enabled)
+{
+    if (s.hit_count >= 24) return;
+    int n = s.hit_count++;
+    // Contiguous 60 px targets under the text; at y=412 the outer corners are still inside the bezel.
+    s.hits[n] = (hit_t){{x, 352, w, 60}, action, 0, enabled};
+    int width = (int)strlen(label) * READER_FONT->width;
+    ht_text(f, x + (w - width) / 2, 368, width, READER_FONT,
+            enabled ? (n == s.pressed ? ACCENT : FG) : DIM, n == s.pressed ? SEL : BG, label);
+}
+static void render_reader(ht_scene_t *f)
+{
+    agent_t *a = active();
+    reader_t r = reader_current(a);
+    int last = reader_last(r.text);
+    if (s.offset > last) s.offset = last;
+    if (s.offset < 0) s.offset = 0;
+    char title[HT_TEXT_BYTES];
+    reader_title(title, sizeof title, a ? a->name : "", r.count - r.index, r.count);
+    ht_center(f, 64, READER_FONT, FG, title);
+    // Always the same nine runs, so a page that is short does not change what the compositor diffs.
+    ht_wrap(f, FACE_CX(READER_W), READER_Y, READER_W, READER_ROWS, s.offset, READER_FONT, FG, r.text);
+    if (!r.text[0]) ht_center(f, 206, READER_FONT, DIM, "Nothing to read yet.");
+    reader_control(f, 89, 90, "[<]", A_READER_OLDER, r.count && r.index + 1 < r.count);
+    reader_control(f, 179, 108, "[back]", A_HOME, true);
+    reader_control(f, 287, 90, "[>]", A_READER_NEWER, r.index > 0);
 }
 /*
  * FOCUS'S LISTS SPEAK THE AGENT SCREEN'S TYPE (owner, 2026-09-30), in the one font of the "Kindle dark" layout (owner,
@@ -2023,15 +2171,9 @@ bool habitat_scene_take(ht_scene_t *f)
     case SETTINGS:
         render_settings(f);
         break;
-    case READER: {
-        agent_t *a = active();
-        heading(f, "latest result");
-        if (a)
-            ui_wrap(f, FACE_CX(348), 125, 348, 5, s.offset, UI_FONT, FG, a->full);
-        control(f, 119, 387, 72, "<", A_UP, 0, s.offset > 0);
-        control(f, 205, 366, 153, "[desktop]", A_DESKTOP, 0, s.connected);
+    case READER:
+        render_reader(f);
         break;
-    }
     case STOP:
         heading(f, "stop this turn?");
         center(f, 185, "Your work stays.", FG);
@@ -2315,6 +2457,11 @@ static void dispatch(action_t a)
     }
     case A_READER:
         view(READER);
+        s.reader_seq = 0;
+        break;
+    case A_READER_OLDER:
+    case A_READER_NEWER:
+        reader_page(a.kind == A_READER_OLDER);
         break;
     case A_QUESTION:
         if (find(a.id) >= 0) s.active = find(a.id);
@@ -2638,15 +2785,17 @@ static void dispatch(action_t a)
             queue(a);
         break;
     case A_UP:
-        s.offset -= s.view == READER ? 5 : 3;
+        if (s.view == READER) { reader_step(-READER_STEP); break; }
+        s.offset -= 3;
         if (s.offset < 0)
             s.offset = 0;
         change();
         break;
     case A_DOWN:
+        if (s.view == READER) { reader_step(READER_STEP); break; }
         if (s.view == INBOX)
             s.offset = s.notice_count ? (s.offset + 1) % s.notice_count : 0;
-        else s.offset += s.view == READER ? 5 : 3;
+        else s.offset += 3;
         change();
         break;
     case A_SETTINGS_SAVE:
@@ -2912,6 +3061,8 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             int travel = (s.last_y - y) * (scroll_reversed ? -1 : 1);
             ht_selection_move(&selection, travel, now);
             change();
+        } else if (s.view == READER && gesture.axis == 1) {
+            reader_move((s.last_y - y) * (scroll_reversed ? -1 : 1));
         } else ht_scroll_move(&scroll, x, y, now);
         if (gesture.moved && s.pressed >= 0) {
             s.pressed = -1;
@@ -3002,7 +3153,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
             } else if (character.id == HT_CHARACTER_FOCUS && s.view != SELECTION) {
                 // Focus's face answers its touches in the branch above; nothing more here.
             } else if (s.connected && !s.loading && pressed_action.id[0]) {
-                ESP_LOGI("habitat", "gesture tap: start voice");
+                ESP_LOGI("habitat", "tap character -> voice");
                 pressed_action.kind = A_VOICE;
                 dispatch(pressed_action);
             }
@@ -3012,12 +3163,18 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 dispatch((action_t){.kind = A_VOICE_STOP, .value = 1});
             } else if (s.view == DRAFT && pressed_action.kind == A_DRAFT_EDIT) {
                 pressed_action.kind = A_DRAFT_OPTIONS; dispatch(pressed_action);
-            } else if (surface && pressed_action.kind == A_PET)
+            } else if (surface && hold_opens_tabs(pressed_action.kind))
                 tabs_open();
+            else if (surface && pressed_action.kind == A_READER) {
+                // A press that lingers on the text still means "read it"; it is never a recording.
+                ESP_LOGI("habitat", "hold recap -> reader");
+                dispatch(pressed_action);
+            }
         } else if (result == HT_TOUCH_TAP) {
             if (pressed_action.kind == A_PET) {
                 if (surface) dispatch(pressed_action); // immediate, harmless acknowledgement
             } else {
+                if (surface && pressed_action.kind == A_READER) ESP_LOGI("habitat", "tap recap -> reader");
                 ht_gesture_cancel(&gesture);
                 dispatch(pressed_action);
             }
@@ -3032,6 +3189,8 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 // Reading/choosing consumed this contact; motion cannot submit an answer.
             } else if (s.view == SELECTION) {
                 // Its bounded reading cursor already consumed this vertical drag.
+            } else if (s.view == READER) {
+                // reader_move followed the finger; releasing near the bottom edge must not leave either.
             } else if (surface && character.id == HT_CHARACTER_FOCUS && dy > 0 && notice_unread(active() ? active()->id : NULL)) {
                 // Pull down from the badge. The creature skins keep this drag inert — their footer
                 // badge is a target you tap — but on Focus the badge sits at the top edge and a pull
@@ -3041,10 +3200,7 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 // A congested scroll queue cannot turn a scroll into navigation or voice.
             } else if (s.start_y >= 400 && dy < 0)
                 view(HOME);
-            else if (s.view == READER) {
-                int next = s.offset + (dy < 0 ? 5 : -5);
-                s.offset = next < 0 ? 0 : next;
-            } else if (s.view == INBOX && s.notice_count)
+            else if (s.view == INBOX && s.notice_count)
                 s.offset = (s.offset + (dy < 0 ? 1 : s.notice_count - 1)) % s.notice_count;
             else {
                 int count = s.view == AGENTS     ? s.count
@@ -3068,6 +3224,9 @@ void habitat_touch(bool down, int x, int y, uint32_t now)
                 if (dx > 0) dispatch((action_t){.kind = A_FORM_BACK, .revision = form.page.revision});
             } else if (question_view(s.view)) {
                 if (dx>0 && !s.q.pending) view(s.view==ANSWER_REVIEW ? CHOICE : s.view==CHOICE ? QUESTION : HOME);
+            } else if (s.view == READER) {
+                // Right reads what came before, left what came after: the direction a page turns back.
+                dispatch((action_t){.kind = dx > 0 ? A_READER_OLDER : A_READER_NEWER});
             } else if (s.view == INBOX && s.notice_count)
                 s.offset = (s.offset + (dx < 0 ? 1 : s.notice_count - 1)) % s.notice_count;
             else if (surface && s.count && s.connected && !s.loading) {
@@ -3123,7 +3282,7 @@ uint32_t habitat_next_wake_ms(void)
         uint32_t due = left < 1 ? 1 : (uint32_t)left;
         if (due < delay) delay = due;
     }
-    if ((s.view == HOME || s.view == AGENT) && pressed_action.kind == A_PET && s.touch_down && !s.touch_cancelled &&
+    if ((s.view == HOME || s.view == AGENT) && hold_opens_tabs(pressed_action.kind) && s.touch_down && !s.touch_cancelled &&
         gesture.live && !gesture.moved && !gesture.guarded) {
         uint32_t elapsed = now - s.touch_started;
         uint32_t due = 650;
@@ -3230,6 +3389,7 @@ static void power(bool on)
         return;
     }
 }
+static void *psram_alloc(size_t n) { return heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT); }
 void ui_init(void)
 {
     display_lock();
@@ -3261,6 +3421,11 @@ void ui_init(void)
     s.straight_title = true;   // the app no longer offers Edge text: straight across (owner, 2026-10-01)
 #endif
     s.ready = true;
+    if (ht_history_init(&history, HISTORY_BYTES, psram_alloc))
+        ESP_LOGI("habitat", "history ready: %u bytes in PSRAM", (unsigned)HISTORY_BYTES);
+    else
+        ESP_LOGW("habitat", "history off: no PSRAM for %u bytes; the reader shows the latest result only",
+                 (unsigned)HISTORY_BYTES);
 #ifdef DEVICE_CREATURE_GALLERY
     ht_gallery_init(&gallery, ms());
     ESP_LOGI("gallery", "20 text creatures / local only; swipe X creature, Y mood or speed, tap replay");
@@ -3649,6 +3814,12 @@ static void event(const char *id, const char *session, const char *kind, const c
     }
     if (!restore) { m->busy = false; m->activity[0] = 0; }
     bool has_text = text_ && *text_ && strcmp(text_, "done");
+    // Every summary that arrives, live or replayed, goes to the history in full (the pane copy below
+    // keeps 1 KB). A replay of a result it already holds is dropped inside; see ht_history_add.
+    if (kind && !strcmp(kind, "summary") && (has_text || (recap && *recap)) &&
+        ht_history_add(&history, id, recap, has_text ? text_ : recap, restore) == HT_HISTORY_ADDED)
+        ESP_LOGI("habitat", "history add (%s): %u entries, %u bytes", restore ? "replay" : "live",
+                 (unsigned)history.count, (unsigned)ht_history_used(&history));
     if ((has_text || (recap && *recap)) && !(restore && (m->live_summary || m->awaiting_result || m->busy))) {
         char preview[sizeof m->preview];
         recap_preview(preview, sizeof preview, recap && *recap ? recap : text_);

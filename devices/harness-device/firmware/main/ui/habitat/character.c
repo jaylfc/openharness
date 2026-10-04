@@ -21,7 +21,7 @@ typedef struct {
     void (*face)(ht_scene_t *, const ht_character_face_t *, uint8_t frame, uint16_t ink,
                  const char *recap);
     // Where this skin puts the rows of a recap, so the tap target is the text and not a guess at it.
-    int (*recap_rows)(const ht_character_face_t *, ht_rect_t *out);
+    int (*recap_rows)(const ht_character_face_t *, const char *recap, ht_rect_t *out);
 } character_definition_t;
 
 #define PORTRAIT(name, species) \
@@ -154,7 +154,8 @@ void ht_character_portrait(ht_scene_t *s, const ht_character_t *c,
     ht_character_face_t face = delivery_face(c, f);
     definition(c->id)->paint(s, &face, c->motion.frame, ink, size, y);
 }
-int ht_character_recap_rows(const ht_character_t *c, const ht_character_face_t *f, ht_rect_t *out)
+int ht_character_recap_rows(const ht_character_t *c, const ht_character_face_t *f, const char *recap,
+                           ht_rect_t *out)
 {
-    return definition(c->id)->recap_rows(f, out);
+    return definition(c->id)->recap_rows(f, recap, out);
 }
