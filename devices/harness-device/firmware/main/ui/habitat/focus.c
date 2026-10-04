@@ -647,7 +647,7 @@ static int recap_block(ht_lv_label_t *body, const char *recap, int *body_y)
     *body_y = RECAP_AREA_Y + (RECAP_AREA_H - n * RECAP_PITCH) / 2 + RECAP_BASELINE - ht_pfont(rf)->ascent;
     return n;
 }
-_Static_assert(HT_CHARACTER_RECAP_ROWS >= RECAP_LINES, "a row for every recap line");
+_Static_assert((int)HT_CHARACTER_RECAP_ROWS >= (int)RECAP_LINES, "a row for every recap line");
 int ht_focus_recap_rows(const ht_character_face_t *f, const char *recap, ht_rect_t *out)
 {
     (void)f;
