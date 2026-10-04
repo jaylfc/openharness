@@ -7,9 +7,10 @@
 int main(void)
 {
     // the table, in order, every action once, every label fits a row with its state
-    assert(ht_menu_count() == 5);
-    static const ht_menu_action_t want[] = {HT_MENU_KEYBOARD, HT_MENU_HISTORY, HT_MENU_SETTINGS, HT_MENU_QUIET, HT_MENU_MUTE};
-    ht_menu_ctx_t c = {.connected = true, .agent = true};
+    assert(ht_menu_count() == 6);
+    static const ht_menu_action_t want[] = {HT_MENU_KEYBOARD, HT_MENU_READ, HT_MENU_SETTINGS, HT_MENU_QUIET, HT_MENU_MUTE,
+                                              HT_MENU_LAUNCHER};
+    ht_menu_ctx_t c = {.connected = true, .agent = true, .launcher = true};
     for (int i = 0; i < ht_menu_count(); i++) {
         assert(ht_menu_item(i)->action == want[i]);
         char label[24];
@@ -20,7 +21,7 @@ int main(void)
         assert(strlen(label) <= HT_MENU_LABEL_CELLS);
         c.quiet = c.muted = false;
     }
-    assert(!ht_menu_item(-1) && !ht_menu_item(5) && !ht_menu_enabled(5, &c) && !ht_menu_enabled(-1, &c));
+    assert(!ht_menu_item(-1) && !ht_menu_item(6) && !ht_menu_enabled(6, &c) && !ht_menu_enabled(-1, &c));
 
     // toggle labels show their state; plain rows do not
     char l[24];
@@ -32,11 +33,14 @@ int main(void)
     ht_menu_label(0, &c, l); assert(!strcmp(l, "Keyboard"));
     c.quiet = c.muted = false;
 
-    // enable rules: a message needs an agent AND a session; the reader needs an agent; the rest always work
+    ht_menu_label(5, &c, l); assert(!strcmp(l, "Return to launcher"));
+    // enable rules: a message needs an agent AND a session; the launcher row needs a launcher; the rest always work
     ht_menu_ctx_t none = {0}, link_only = {.connected = true}, agent_only = {.agent = true};
     assert(ht_menu_enabled(0, &c) && !ht_menu_enabled(0, &none) && !ht_menu_enabled(0, &link_only) && !ht_menu_enabled(0, &agent_only));
-    assert(ht_menu_enabled(1, &c) && !ht_menu_enabled(1, &none) && ht_menu_enabled(1, &agent_only));
-    for (int i = 2; i < 5; i++) assert(ht_menu_enabled(i, &none) && ht_menu_enabled(i, &c));
+    for (int i = 1; i < 5; i++) assert(ht_menu_enabled(i, &none) && ht_menu_enabled(i, &c));
+    ht_menu_ctx_t launcher_only = {.launcher = true};
+    assert(ht_menu_enabled(5, &c) && !ht_menu_enabled(5, &none) && !ht_menu_enabled(5, &agent_only) &&
+           ht_menu_enabled(5, &launcher_only));
 
     // when a shake may open it: only the main faces, awake, idle audio, no finger
     for (int m = 0; m < 2; m++) for (int a = 0; a < 2; a++) for (int v = 0; v < 2; v++) for (int t = 0; t < 2; t++)

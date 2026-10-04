@@ -73,6 +73,7 @@ set(BOARD_SRCS
     "ui/habitat/history.c"
     "ui/habitat/keyboard.c"
     "ui/habitat/shake_menu.c"
+    "launcher_return.c"
     "ui/habitat/octopus.c"
     "ui/habitat/ascii_clip.c"
     "ui/habitat/octopus_font.c"
@@ -94,6 +95,7 @@ set(BOARD_REQUIRES
     esp_http_client
     esp_https_ota
     app_update
+    bootloader_support
     esp_partition
     mbedtls
     esp_websocket_client

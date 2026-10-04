@@ -1,18 +1,19 @@
 #include "shake_menu.h"
 #include <stdio.h>
 
-static bool needs_agent(const ht_menu_ctx_t *c) { return c->agent; }
 static bool needs_agent_link(const ht_menu_ctx_t *c) { return c->agent && c->connected; }
+static bool needs_launcher(const ht_menu_ctx_t *c) { return c->launcher; }
 static int quiet_state(const ht_menu_ctx_t *c) { return c->quiet ? 1 : 0; }
 static int muted_state(const ht_menu_ctx_t *c) { return c->muted ? 1 : 0; }
 
 // THE TABLE. Order is the order on screen.
 static const ht_menu_item_t items[] = {
     {"Keyboard",    HT_MENU_KEYBOARD, needs_agent_link, NULL},   // a message needs an agent AND a daemon
-    {"History",     HT_MENU_HISTORY,  needs_agent,      NULL},   // the reader works from what the dial holds
+    {"Read",        HT_MENU_READ,     NULL,             NULL},   // with nothing yet it says so
     {"Settings",    HT_MENU_SETTINGS, NULL,             NULL},
     {"Quiet mode",  HT_MENU_QUIET,    NULL,             quiet_state},
     {"Mute sounds", HT_MENU_MUTE,     NULL,             muted_state},
+    {"Return to launcher", HT_MENU_LAUNCHER, needs_launcher, NULL},   // only under the Orb launcher
 };
 
 int ht_menu_count(void) { return (int)(sizeof items / sizeof items[0]); }

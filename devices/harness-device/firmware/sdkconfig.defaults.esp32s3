@@ -79,3 +79,8 @@ CONFIG_LWIP_MAX_UDP_PCBS=8
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
 CONFIG_LWIP_TCP_WND_DEFAULT=16384
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=16
+# --- taOS Orb launcher boot word (main/launcher_return.c) ------------------------------------------------
+# A 16-byte block in RTC FAST memory (rtc_retain_mem_t.custom) that the Orb's custom bootloader and the apps
+# both reach. The sizes must equal the Orb build's or the two sides compute different addresses.
+CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC=y
+CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC_SIZE=0x10

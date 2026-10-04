@@ -16,6 +16,7 @@
 #include "history.h"
 #include "keyboard.h"
 #include "shake_menu.h"
+#include "launcher_return.h"
 #include "theme.h"
 #include "focus_faces.h"
 #ifdef DEVICE_CREATURE_GALLERY
@@ -2125,6 +2126,7 @@ static void menu_ctx(ht_menu_ctx_t *c)
     c->agent = active() != NULL;
     c->quiet = s.quiet;
     c->muted = s.muted;
+    c->launcher = launcher_present();
 }
 static void render_shake_menu(ht_scene_t *f)
 {
@@ -2135,7 +2137,7 @@ static void render_shake_menu(ht_scene_t *f)
     int first = paged ? s.offset : 0;
     if (first < 0) first = 0;
     if (first >= count) first = count - 1;
-    // A table that fits is five rows of 52; a longer one is three per page at the models list's pitch.
+    // A table that fits is six rows of 44; a longer one is three per page at the models list's pitch.
     int top = paged ? 153 : HT_MENU_TOP, pitch = paged ? 72 : HT_MENU_PITCH;
     for (int row = 0; row < rows && first + row < count; row++) {
         int i = first + row, y = top + row * pitch, hit = s.hit_count++;
@@ -2523,7 +2525,7 @@ static void menu_run(int i)
         COPY(keyboard_agent, active()->id);
         view(KEYBOARD);
         break;
-    case HT_MENU_HISTORY:
+    case HT_MENU_READ:
         dispatch((action_t){.kind = A_READER});
         break;
     case HT_MENU_SETTINGS:
@@ -2534,6 +2536,9 @@ static void menu_run(int i)
         break;
     case HT_MENU_MUTE:
         menu_toggle(UI_SETTING_MUTED);
+        break;
+    case HT_MENU_LAUNCHER:
+        launcher_return();
         break;
     }
 }

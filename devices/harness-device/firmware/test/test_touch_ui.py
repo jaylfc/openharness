@@ -233,6 +233,9 @@ for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notic
 code += function('render_settings') + function('ui_visit_state')
 code += function('ui_project_known') + function('ui_focus_project') + function('ui_apply_pending_focus')
 code += function('focus_centred') + function('focus_header') + function('focus_clipped') + function('render_focus_panes') + function('panes_move') + function('panes_settle') + function('render_agents') + function('tabs_move') + function('tab_name') + function('render_focus_tabs') + function('render_tabs') + function('page_controls') + function('render_notice') + function('render_focus_inbox') + function('render_list')
+code += 'static bool fake_launcher; static int launcher_returns;\n'
+code += 'static bool launcher_present(void) { return fake_launcher; }\n'
+code += 'static void launcher_return(void) { launcher_returns++; }\n'
 code += function('menu_ctx') + function('render_shake_menu') + function('keyboard_key_text') + function('render_keyboard')
 for name in ['notice_remove', 'notice_sync_view', 'notice_selection', 'notice_restore_selection', 'notice_add', 'ui_notify_task_done', 'ui_notif_seen', 'ui_notif_read', 'ui_notif_replace', 'ui_notif_open', 'ui_question_close', 'ui_answer_receipt']:
     code += function(name)
@@ -331,7 +334,7 @@ static void scene_take(void) {
 static bool history_fail;
 static void *history_alloc(size_t n) { static char *block; free(block); block = history_fail ? NULL : malloc(n); return block; }
 static void reset(void) {
-    host_features=31; fake_ms=0; fake_asleep=false; present_scene=true;
+    host_features=31; fake_ms=0; fake_asleep=false; present_scene=true; fake_launcher=false; launcher_returns=0;
     memset(&visit,0,sizeof visit); visit_sends=visit_wire=returns=0; question_pending=false;
     memset(&tab_carousel,0,sizeof tab_carousel);
     memset(&workspace,0,sizeof workspace); tab_switches=0; tab_target[0]=0;
@@ -1500,7 +1503,7 @@ static void tap_key(const char *label) {
     ht_key_t k=ht_kb_key(i);
     shake_clock+=400; tap(shake_clock,k.x+k.w/2,k.y+k.h/2);
 }
-static void tap_menu_row(int row) { shake_clock+=400; tap(shake_clock,233,108+row*52+26); }
+static void tap_menu_row(int row) { shake_clock+=400; tap(shake_clock,233,HT_MENU_TOP+row*HT_MENU_PITCH+HT_MENU_PITCH/2); }
 static void assert_plain_screen(void) {
     // Nothing on these screens can start a recording, and everything drawn is on the glass.
     assert(scene.count<=HT_RUNS);
@@ -1525,20 +1528,31 @@ static void shake_menu_checks(void) {
     reset(); s.touch_down=true; ui_shake(); assert(s.view==HOME);          // nor under a finger
     reset(); s.view=VOICE; s.voice_open=true; recording=true; ui_shake(); assert(s.view==VOICE);
 
-    // THE MENU: five rows in the table's order, a back control, nothing that records, all on the glass.
+    // THE MENU: six rows in the table's order, a back control, nothing that records, all on the glass.
     reset(); ui_shake(); scene_take();
-    assert(ht_menu_count()==5);
-    assert(scene_has("Keyboard") && scene_has("History") && scene_has("Settings") &&
+    assert(ht_menu_count()==6);
+    assert(scene_has("Keyboard") && scene_has("Read") && scene_has("Settings") && scene_has("Return to launcher") &&
            scene_has("Quiet mode: off") && scene_has("Mute sounds: off") && scene_has("[back]"));
     int items=0; for (int i=0;i<s.hit_count;i++) items+=s.hits[i].action==A_MENU_ITEM;
-    assert(items==5 && action_enabled(A_HOME));
+    assert(items==6 && action_enabled(A_HOME));
     assert_plain_screen();
-    // Enable rules: no agent link, no keyboard; the reader and the rest do not need one
+    // Enable rules: no agent link, no keyboard; no launcher, no way back to it; the rest need neither
     reset(); s.connected=false; ui_shake(); scene_take();
     assert(!s.hits[0].enabled && s.hits[1].enabled && s.hits[2].enabled && s.hits[3].enabled && s.hits[4].enabled);
+    assert(!s.hits[5].enabled);
     tap_menu_row(0); assert(s.view==SHAKE_MENU);                            // a disabled row does nothing
-    reset(); s.count=0; s.active=-1; ui_shake(); scene_take();
-    assert(!s.hits[0].enabled && !s.hits[1].enabled && s.hits[2].enabled);
+    tap_menu_row(5); assert(s.view==SHAKE_MENU && !launcher_returns);
+    // READ opens the reader even with no agent and nothing to read, and says so; its pages do nothing
+    reset(); shake_clock=1000; s.count=0; s.active=-1; ui_shake(); scene_take();
+    assert(!s.hits[0].enabled && s.hits[1].enabled && s.hits[2].enabled);
+    tap_menu_row(1); assert(s.view==READER); scene_take(); assert(scene_has("Nothing to read yet."));
+    habitat_touch(true,100,200,shake_clock+=400); habitat_touch(false,300,200,shake_clock+=100); scene_take();
+    habitat_touch(true,300,200,shake_clock+=400); habitat_touch(false,100,200,shake_clock+=100); scene_take();
+    assert(s.view==READER && scene_has("Nothing to read yet."));
+    // RETURN TO LAUNCHER: under the Orb launcher the row is live and one tap hands over
+    reset(); shake_clock=1000; fake_launcher=true; ui_shake(); scene_take(); assert(s.hits[5].enabled);
+    assert_plain_screen();
+    tap_menu_row(5); assert(launcher_returns==1);
 
     // ROWS RUN THE EXISTING SCREENS. Settings and History are the reader and the controls list.
     reset(); shake_clock=1000; ui_shake(); scene_take();
@@ -1620,7 +1634,7 @@ static void shake_menu_checks(void) {
     // going to sleep from either screen drops back to HOME and forgets the typing
     reset(); ui_shake(); scene_take(); tap_menu_row(0); scene_take(); tap_key("q"); power(false); assert(s.view==HOME && keyboard.len==0);
     reset(); ui_shake(); power(false); assert(s.view==HOME);
-    puts("shake menu: PASS (reachable from HOME/AGENT only, five rows and their rules, toggles through the settings applier, keyboard typing/send/refusals, BOOT and back, sleep forgets)");
+    puts("shake menu: PASS (reachable from HOME/AGENT only, six rows and their rules, toggles through the settings applier, keyboard typing/send/refusals, BOOT and back, sleep forgets)");
 }
 int main(int argc, char **argv) {
     test_character = getenv("HABITAT_TEST_TUX") ? HT_CHARACTER_TUX : HT_CHARACTER_TIM;

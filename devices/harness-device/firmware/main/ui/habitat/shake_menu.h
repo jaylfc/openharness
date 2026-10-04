@@ -9,10 +9,11 @@
 
 typedef enum {
     HT_MENU_KEYBOARD,   // type a message to the agent on screen
-    HT_MENU_HISTORY,    // the reader, on that agent's results
+    HT_MENU_READ,       // the reader: that agent's results, or "Nothing to read yet."
     HT_MENU_SETTINGS,   // the controls list
     HT_MENU_QUIET,      // toggle: the character stops animating
     HT_MENU_MUTE,       // toggle: the finished-turn beep
+    HT_MENU_LAUNCHER,   // back to the taOS Orb launcher (launcher_return.h)
 } ht_menu_action_t;
 
 // What the enable rules may look at. Filled by the caller under the display lock.
@@ -20,6 +21,7 @@ typedef struct {
     bool connected;   // a daemon session is up
     bool agent;       // there is an agent on screen
     bool quiet, muted;
+    bool launcher;    // flashed as a guest of the taOS Orb launcher (a factory app exists)
 } ht_menu_ctx_t;
 
 typedef struct {
@@ -29,7 +31,7 @@ typedef struct {
     int (*state)(const ht_menu_ctx_t *);          // NULL = not a toggle; else 0 off, 1 on
 } ht_menu_item_t;
 
-#define HT_MENU_LABEL_CELLS 17   // one row: 300 px of the 17 px cell
+#define HT_MENU_LABEL_CELLS 18   // one row: 306 px of the 17 px cell
 
 int ht_menu_count(void);
 const ht_menu_item_t *ht_menu_item(int i);        // NULL out of range
@@ -43,12 +45,12 @@ bool ht_menu_may_open(bool on_main_face, bool asleep, bool voice_busy, bool touc
 
 // Row layout. Up to HT_MENU_ROWS_ALL rows fit on the glass at once; a longer table shows
 // HT_MENU_ROWS_PAGED per page under the pager the models list already uses.
-#define HT_MENU_ROWS_ALL 5
+#define HT_MENU_ROWS_ALL 6
 #define HT_MENU_ROWS_PAGED 3
 #define HT_MENU_TOP 108
-#define HT_MENU_PITCH 52
+#define HT_MENU_PITCH 44
 #define HT_MENU_X 59
 #define HT_MENU_W 348
-#define HT_MENU_TEXT_X 83
-#define HT_MENU_TEXT_W 300
+#define HT_MENU_TEXT_X 80
+#define HT_MENU_TEXT_W 306
 int ht_menu_rows(int count);                      // rows drawn per page for a table of `count`
